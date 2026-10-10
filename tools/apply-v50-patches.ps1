@@ -428,6 +428,7 @@ Write-Host "=== 7. mirror every patched OpenWrt file into the vendor overlay (li
 $mirror = @(
     'etc\init.d\mu300-hw',
     'etc\init.d\mu300-post',
+    'etc\init.d\mu300-buttons',
     'etc\hotplug.d\iface\10-mu300-usb',
     'etc\uci-defaults\90-mu300',
     'opt\mu300\bin\mu300-lancheck',
@@ -435,6 +436,11 @@ $mirror = @(
     # to /opt/mu300 - but a PREBUILT install never runs build-rootfs.sh, so this has to come through
     # vendor-extra as well or the V50's key keeps doing nothing on such a device.
     'opt\mu300\bin\mu300-buttons=rootfs\overlay\opt\mu300\bin\mu300-buttons',
+    # Same story for the two scripts behind the LED scheme (step 19): mu300-led draws it and mu300-wifi-band
+    # keeps it in step after a band switch. Both live in rootfs/overlay/, so a PREBUILT install gets the
+    # upstream versions from the rootfs tarball and the V50 would light up nobody's colours.
+    'opt\mu300\bin\mu300-led=rootfs\overlay\opt\mu300\bin\mu300-led',
+    'opt\mu300\bin\mu300-wifi-band=rootfs\overlay\opt\mu300\bin\mu300-wifi-band',
     # apk's package feed. Overwrites the download root baked into the rootfs tarball, so a device
     # installed from a prebuilt release fetches packages from a mirror instead (see step 16).
     'etc\apk\repositories.d\distfeeds.list',
@@ -977,6 +983,52 @@ if ($bad.Count) {
     throw 'encoding gate: fix the files above (re-encode as UTF-8 without BOM and LF) and run this again'
 }
 Write-Host '  ok: every file that ships to the device is plain UTF-8 with LF endings'
+
+Write-Host ""
+Write-Host "=== 19. gate: the key, its colours and its reader are all in place ==="
+# The scheme is three scripts calling each other, and every way it can be half-applied fails SILENTLY:
+# mu300-buttons asks mu300-led for "flash" and a version without that branch answers nothing and does nothing
+# (a subcommand mu300-led does not know prints its usage and exits 2), so the key looks dead - no error
+# anywhere, only a light that never changes. mu300-wifi-band not telling mu300-led at all is the same: the
+# colour stays on the band that was just switched away from. And a file missing from the vendor overlay is
+# the one failure that only shows on a PREBUILT install, months later, on somebody else's device.
+# So: check the calls exist, check the branches they call exist, and check all three are mirrored.
+$ledTree = "$Repo\rootfs\overlay\opt\mu300\bin"
+$ledChecks = @(
+    @{ File = "$ledTree\mu300-led";      Have = @('"flash "*)', '"data on")', 'render() {');                     Want = 'the scheme itself: render() and the flash branch' },
+    @{ File = "$ledTree\mu300-buttons";  Have = @('mu300-led flash', 'mu300-led alarm on');                    Want = 'the V50 key: a flash on the press, the siren on the hold' },
+    @{ File = "$ledTree\mu300-wifi-band"; Have = @('mu300-led" wifi sync');                                    Want = 'a band switch telling the LED which band it is' },
+    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50');                  Want = 'the v50 scheme being turned on for the V50' },
+    @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()');                   Want = 'one key reader: a restart that leaves the old one handles every press twice' }
+)
+$ledBad = @()
+foreach ($c in $ledChecks) {
+    if (-not (Test-Path $c.File)) { $ledBad += ('  missing file: ' + $c.File.Substring($Repo.Length + 1)); continue }
+    $text = [IO.File]::ReadAllText($c.File)
+    # Full-line comments are stripped first, and the reason is this project's oldest lesson: these scripts
+    # document what they do, so the needle usually appears in the comment TOO - a gate that reads the comment
+    # passes on a file whose code was taken out, which is the one failure it exists to catch.
+    # Contains, not -like: the needles carry shell wildcards of their own ("flash "*)), and -like would read
+    # those as its own and pass on a file that does not have them.
+    $code = ($text -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    foreach ($h in $c.Have) {
+        if (-not $code.Contains($h)) { $ledBad += ('  ' + $c.File.Substring($Repo.Length + 1) + '  ->  no ' + $h) }
+    }
+    Write-Host ('  checked: ' + $c.File.Substring($Repo.Length + 1) + '  (' + $c.Want + ')')
+}
+foreach ($n in @('mu300-led', 'mu300-wifi-band', 'mu300-buttons')) {
+    if (-not ($mirror -match [regex]::Escape("opt\mu300\bin\$n="))) {
+        $ledBad += "  openwrt/vendor-extra/opt/mu300/bin/$n  ->  not in the step 7 mirror list, so a prebuilt install never gets it"
+    }
+    $dst = "$Repo\openwrt\vendor-extra\opt\mu300\bin\$n"
+    if (-not (Test-Path $dst)) { $ledBad += "  openwrt/vendor-extra/opt/mu300/bin/$n  ->  not mirrored yet (step 17b did not run)" }
+}
+if ($ledBad) {
+    Write-Host "  FAIL: the LED scheme is not whole:"
+    $ledBad | ForEach-Object { Write-Host $_ }
+    throw 'LED gate: fix the above and run this again'
+}
+Write-Host '  ok: the scheme is complete, and all three scripts reach a prebuilt install'
 
 Write-Host ""
 if ($patched) { Write-Host "$patched patch(es) applied." }

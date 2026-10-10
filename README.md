@@ -8,7 +8,7 @@
 |---|---|
 | 目标设备 | ZTE V50（`MU3351`，板型 `ums9620_2h10_feimao`） |
 | 上游项目 | [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)（MIT） |
-| 验证版本 | 上游 **v2026.10.12** + 本仓库 18 步补丁 |
+| 验证版本 | 上游 **v2026.10.12** + 本仓库 19 步补丁 |
 | 系统 | Android 13 + OpenWrt 25.12.5（`openwrt-luci` 面板版） |
 | 内核 | **5.4.254**（vendor 基线）或 **6.18.55**（主线，实测可用）。安装向导本来就会问，已装设备可 `mu300-update kernel` 就地切换、`rollback-boot` 回退。见 `docs/07-6.18内核与按键与监管域.md` |
 | 风险 | 低。不动 `boot_a` / GPT / `userdata`；只写 Linux 区、`boot_b`、`misc` 的 32 字节 |
@@ -22,7 +22,8 @@
 | **WiFi 热点可连且能拿 IP** | 广播热点，客户端自动获得 `192.168.77.100-249` 段地址，能上网 |
 | **USB 网络可选** | 切成 RNDIS 后 PC 出现网卡并拿到 LAN 地址，USB 也能上网 |
 | 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。链路经实测确为 **USB 3.0 SuperSpeed**（`bcdUSB 0x0320` / `current_speed=super-speed`），但单条 TCP 流只能拿到 300–400 Mbps，想跑满要**多流并发**。测法与「一种会被 `nc` 循环伪装成"不扩展"的错测法」见 `docs/06-OpenWrt操作手册.md` 附录 |
-| **实体按键** | 短按：热点 **2.4GHz ↔ 5GHz**；按住 **10 秒**：重启设备（V50 的键报 KEY_FN=464，上游只认 116/138，故原先无反应。见 §4.6） |
+| **实体按键** | 短按：热点 **2.4GHz ↔ 5GHz**（闪 2 下确认）；按住 **10 秒**：重启设备，三色轮流闪到下电（V50 的键报 KEY_FN=464，上游只认 116/138，故原先无反应。见 §4.6） |
+| **指示灯** | **无外网=红 / 有网+5GHz=白 / 有网+2.4GHz=蓝**（单通道纯色）。切频段后自动跟随。F50/U30 Air 的原灯语不受影响，可配。见 §4.7 |
 | **无线国家码** | 默认 `US`：2.4GHz 允许 **30 dBm**（BO/CN 只有 20），且允许低段 5GHz 起 AP |
 | 管理 | `ssh root@192.168.77.1`；LuCI `http://192.168.77.1/cgi-bin/luci/` |
 | 一键切换 | 在 Android 侧一条命令进 OpenWrt；在 OpenWrt 里重启即回 Android |
@@ -66,7 +67,7 @@ $R   = '<本仓库克隆到某处>'          # 例：D:\V50
 # 1) 取上游源码（版本要匹配，见 3.1）
 git clone https://github.com/dikeckaan/mu300-linux "$R\mu300-linux"
 
-# 2) 打补丁（18 步，幂等，可重复跑）
+# 2) 打补丁（19 步，幂等，可重复跑）
 & "$R\tools\apply-v50-patches.ps1" -Repo "$R\mu300-linux"
 
 # 3) 只读检查
@@ -112,7 +113,7 @@ INSTALL  最终确认（必须是大写 INSTALL）
 
 ## 4. 必须打的补丁，以及不打会怎样
 
-上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 18 步：
+上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 19 步：
 
 | 步 | 修什么 | 不打会怎样 |
 |---|---|---|
@@ -136,6 +137,7 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 17 | **apk 软件源指向清华 TUNA 镜像** | 4G 下官方源慢 2.25 倍；换成阿里云则**根本装不了包**（见 §4.3） |
 | 17b | 把上面改过的文件镜像进 `openwrt/vendor-extra/`（**必须在所有内容修改之后**） | 预编译安装只读 vendor-extra，镜像早了就发出去未修补的版本（见 §4.5） |
 | 18 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
+| 19 | **灯光方案一致性门禁**（三个脚本的互相调用 + 必须进 vendor-extra） | 半套方案**全是静默失效**：按键调一个 `mu300-led` 没有的子命令，只是打印用法然后什么也不做 |
 
 ### 4.1 第 15 步：为什么 DNS 那一栏永远是 `--`
 
@@ -242,7 +244,8 @@ V50 实测键码（解 `/dev/input/event0` 得到）：
 | `key-volumedown` / `key-volumeup` | `0x72` / `0x73` | 114 / 115 | |
 | **`key-function`** | `0x1D0` | **464** | **KEY_FN —— V50 唯一的实体键** |
 
-绑定后：**短按** → `mu300-wifi-band toggle`（2g/ch6 ↔ 5g/ch36）；**长按 10 秒** → `reboot`。
+绑定后：**短按** → `mu300-wifi-band toggle`（2g/ch6 ↔ 5g/ch36），并**先闪 2 下**确认；
+**长按 10 秒** → 红/白/蓝**轮流闪**到设备重启。
 长按阈值按设备树判断（`key-function` 节点只有 V50 有，模型字符串与 F50 相同，分不出来）：
 
 ```sh
@@ -251,10 +254,56 @@ HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && 
 
 实测：短按 → `band` 由 `2g ch=6` 变 `5g ch=36` ✅；长按 10 秒 → 重启并自动恢复热点 ✅。
 
+> **按键"完全没反应"时，先数一下有几个按键读取进程**：
+> ```sh
+> ps w | grep -c '[m]u300-keys'      # 必须恰好是 1
+> ```
+> 上游的 `/etc/init.d/mu300-buttons` 没有 `stop_service()`，`restart` 停不掉旧实例，
+> 第二个 `mu300-keys` 会同时读同一个 gpio-keys，**每次按键被处理两遍** ——
+> 切频段切两次等于没切，灯也毫无反应，看起来像键坏了。补丁已补上 `stop_service()`（实测连重启 4 次，每次都只剩 1 套）。
+
 > 按键"没反应"时，先看 `/run/mu300/power/state` 是否 `active`、`mu300-power daemon` 是否在跑 ——
 > 上游逻辑里 **idle 状态下的第一次按下只唤醒、不执行动作**，别一上来就怀疑键码。
 
 完整记录（含 6.18/7.2 内核切换与回退）见 `docs/07-6.18内核与按键与监管域.md`。
+
+### 4.7 指示灯：无外网=红，有网+5GHz=白，有网+2.4GHz=蓝
+
+V50 的那颗 RGB 指示灯（PMIC `sc27xx:*`）不跟 F50 一样"只报数据状态"，而是**一次说完两件事**：
+
+| 有无外网 | 频段 | 灯 | 通道 |
+|---|---|---|---|
+| **无** | 任意 | **红** | `sc27xx:red` |
+| 有 | 5 GHz | **白** | `sc27xx:green` |
+| 有 | 2.4 GHz | **蓝** | `sc27xx:blue` |
+
+> 「白」是这颗 PMIC 的 `green` 通道 —— ZTE 在 Android 侧把它叫 `white`，**同一个灯，不同名字**。
+> 三个状态都是**单通道纯色、不混色**，亮度最高最可靠。
+
+- **「有无网」的判据 = 调制解调器数据已连接**（`mobile-data` 的 `data on`/`data 5g` 事件），
+  **不去 ping 外网**，不产生额外流量与延迟。注意它**不等于真的能上外网**（DNS 坏、路由坏时它照样是白/蓝）。
+- **红优先**：三个状态里只有"没网"需要人处理，所以它盖过频段（无网 + 2.4GHz 显示红，不显示蓝）。
+- **切频段后颜色自动跟随** —— 这是补丁里 `mu300-wifi-band` 补的那一句 `mu300-led wifi sync`。
+  没有它，颜色会一直停在刚切走的那一档。
+- **F50 / U30 Air 完全不受影响**：方案由 `LED_SCHEME=v50` 打开，默认是 `classic`（原灯语）。
+
+改颜色 / 亮度不用重新编译，改 `/etc/mu300/led.conf` 即可（`LED_SCHEME`、`NO_NET_CHANNEL`、
+`NET5_CHANNEL`、`NET24_CHANNEL`、`KEY_FLASH_COUNT`、`LED_LEVEL` 百分比）。
+**想把灯变回 F50 原来的样子**：把那行 `LED_SCHEME=v50` 注释掉。
+
+两个只有实施时才会撞上、且已修的问题：
+
+1. **设备的 `sleep` 不吃小数秒** —— OpenWrt 自带 busybox 直接报 `sleep: invalid number`，
+   于是上游 `mu300-led nap()` 的兜底把 0.15 秒变成整整 1 秒：**闪 2 下会变成 4 秒**，
+   上游 siren 每色 0.25 秒也实际按 1 秒走。已改成优先用发布版自带的 busybox（带 `FANCY_SLEEP`）。
+2. **`nap()` 之外**：`data *` 与 `wifi *` 两套独立点灯逻辑会互相覆盖、且没人重算，
+   所以颜色统一由一个 `render()` 按"两个状态"算出来，`data` 事件、`wifi` 同步、`wake`、
+   `idle off`、`charge off`、`alarm off` 都会重绘一次。
+
+完整实测记录（含逐条验证表与退路）见 `docs/08-灯光效果方案.md`。
+
+> **颜色本身还需要你在机器旁用眼睛确认一次**：上面验证的是"哪一路被点亮、亮度多少"，
+> "`sc27xx:green` 在你眼前是不是白"只有人能做。`mu300-led test` 会逐个点亮并报名字。
 
 ---
 
@@ -394,8 +443,9 @@ docs/
   05-一键复刻指南.md         分阶段清单式复刻步骤 + 验收清单
   06-OpenWrt操作手册.md      刷完后的日常操作（各通道、坑、能力清单）
 07-6.18内核与按键与监管域.md 6.18/7.2 内核切换（含 rollback）、5GHz 监管域根因、实体按键键码与映射
+08-灯光效果方案.md         灯语表、三态实现、实测结果、两个只有实施时才发现的坑与退路
 tools/
-  apply-v50-patches.ps1     18 步补丁（幂等，含编码门禁）★核心
+  apply-v50-patches.ps1     19 步补丁（幂等，含编码与灯光门禁）★核心
   backup-v50-partitions.ps1 28 分区备份 + sha256 校验
   audit-repo-encoding.ps1   扫 UTF-16 / BOM / CRLF
   collect-v50-logs.ps1      回 Android 后取 Linux 的持久化日志
@@ -403,6 +453,10 @@ tools/
   mu300.ps1                 SSH：执行命令 / 推文件 / 取文件
   mu300-api.ps1             ubus JSON-RPC 客户端
   mu300-console.ps1         USB 串口 COM12 读写
+  push-file.ps1             推**大文件**到设备（分块；单条 argv 装不下时会静默断连）
+  led-scheme-test.sh        灯光方案的无设备回归测试（假 sysroot，18 条断言）★
+  led-probe.sh              设备侧：报告三色与当前网络/频段状态（不用眼睛也能确认点亮了哪路）
+  buttons-audit.sh          设备侧：数有几个按键读取进程（多于 1 就是 §4.6 那个坑）
 plugins/
   ufi-tools-restart-to-openwrt.js   UFI-TOOLS 一键切换插件
 patches/
