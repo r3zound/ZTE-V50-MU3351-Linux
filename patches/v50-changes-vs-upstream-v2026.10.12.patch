@@ -1,0 +1,868 @@
+diff --git a/android/magisk/mu300-linux-switch/switch.sh b/android/magisk/mu300-linux-switch/switch.sh
+index 3bbfb4f..cd2f239 100755
+--- a/android/magisk/mu300-linux-switch/switch.sh
++++ b/android/magisk/mu300-linux-switch/switch.sh
+@@ -69,11 +69,14 @@ b_meta=$(echo "$live" | cut -c29-30)
+ # line (offset 44; boot/build-boot-image.py, and mu300-update keeps the header), Android's boot images do not.
+ if [ -n "$linux_slot" ]; then
+     head_target=$(hex_of "$linux_boot" 0 8)
+-    cmdline_target=$(hex_of "$linux_boot" 44 11)
++    # the first 10 bytes of the command line, not all 11: "loglevel=5" identifies the image, the byte after
++    # it does not. Android's boot images have nothing at offset 44, so the two are still told apart, and a
++    # command line that grows (as one that adds MU300_USBNET=rndis did) no longer hides an installed Linux.
++    cmdline_target=$(hex_of "$linux_boot" 44 10)
+     same=no
+     [ "$(head_md5 "$android_boot")" = "$(head_md5 "$linux_boot")" ] && same=yes
+ fi
+-LINUX_CMDLINE=6c6f676c6576656c3d3500    # "loglevel=5\0"
++LINUX_CMDLINE=6c6f676c6576656c3d35      # "loglevel=5"
+ 
+ if [ "$ACTION" = status ]; then
+     echo "running slot   ${slot:-unknown}"
+diff --git a/boot/build-boot-image.py b/boot/build-boot-image.py
+index bbab520..c0623fe 100755
+--- a/boot/build-boot-image.py
++++ b/boot/build-boot-image.py
+@@ -30,6 +30,12 @@ from pathlib import Path
+ 
+ HERE = Path(__file__).resolve().parent
+ PAGE = 4096
++# The boot image's kernel command line is also how the Android side recognises a Linux boot image:
++# android/magisk/mu300-linux-switch/switch.sh reads 11 bytes at offset 44 and compares them with
++# "loglevel=5\0" (android/magisk/mu300-linux-switch/customize.sh does the same when the module is
++# installed). So this string must stay exactly that - appending to it (an extra MU300_USBNET=rndis was
++# tried here and reverted) makes switch.sh report boot_b as "a boot image that is not Linux" and the
++# device can no longer be switched into Linux from Android at all.
+ BOOT_CMDLINE = b'loglevel=5'
+ MISC_BC_OFFSET = 0x800
+ # persistent init log lives at 48 MiB inside boot_b (8 MiB); the image must end before it
+diff --git a/install.ps1 b/install.ps1
+index c940bbc..44c8001 100644
+--- a/install.ps1
++++ b/install.ps1
+@@ -216,7 +216,7 @@ function SelectDevice([switch]$Quiet) {
+     if ($env:ANDROID_SERIAL) { return }
+     $all = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' })
+     if ($all.Count -eq 0) { return }
+-    $f50 = @($all | Where-Object { $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })
++    $f50 = @($all | Where-Object { $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })
+     # the only adb device, and an F50/U30 Air: nothing to ask
+     if ($all.Count -eq 1 -and $f50.Count -eq 1) { $env:ANDROID_SERIAL = ($all[0] -split '\s+')[0]; return }
+     # -Quiet (waiting for the device to come back as Android): only the one F50/U30 Air, never a question.
+@@ -243,17 +243,21 @@ function Ask($question, $default) {
+     if ([string]::IsNullOrWhiteSpace($a)) { return $default } else { return (NormalizeAnswer $a.Trim()) }
+ }
+ # adb shell with root; stdin is never forwarded so prompts of this script are not eaten
++# The binary used to run as root. Not every device has `su` on PATH (this V50: Magisk's root lives in
++# /debug_ramdisk/su only), and the stock installer then reports "su does not work on the device" while
++# root is in fact available. Resolved below, after the device is pinned; 'su' stays the first choice.
++$script:Su = 'su'
+ function SuDo($cmd) {
+-    (Quiet { adb shell "su -c '$cmd'" }) -join "`n" -replace "`r", ''
++    (Quiet { adb shell "$script:Su -c '$cmd'" }) -join "`n" -replace "`r", ''
+ }
+ # Write the file on the device and pull it. cmd.exe redirection does keep the byte stream intact on this
+ # side, but the damage happens on the other one: some devices give `su -c` a pty, whose ONLCR rewrites every
+ # LF as CRLF, so the bytes are already corrupt before they reach the host (issue #2).
+ function SuDoToFile($cmd, $path) {
+     $dev = '/data/local/tmp/mu300-pull.bin'
+-    & adb shell "su -c '$cmd > $dev'" | Out-Null
++    & adb shell "$script:Su -c '$cmd > $dev'" | Out-Null
+     Quiet { adb pull $dev "$path" } | Out-Null
+-    & adb shell "su -c 'rm -f $dev'" | Out-Null
++    & adb shell "$script:Su -c 'rm -f $dev'" | Out-Null
+ }
+ $script:PyExe = $null
+ # A Python that really runs, 3.8 or newer. Being on PATH says little on Windows: without Python installed, python.exe
+@@ -369,7 +373,7 @@ if (-not $Check) {
+ Quiet { adb start-server } | Out-Null
+ # The device in Linux, and only a phone or tablet in Android: that is not the one to install to - offer to send the
+ # device back to Android first
+-$target = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' -and $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })
++$target = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' -and $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })
+ $linuxFirst = (-not $env:ANDROID_SERIAL) -and $target.Count -eq 0 -and (LinuxRunning)
+ if (-not $linuxFirst) { SelectDevice }
+ if ($linuxFirst -or (AdbState) -notmatch 'device') {
+@@ -405,6 +409,17 @@ for ($i = 0; $i -lt 60 -and (SuDo 'getprop sys.boot_completed') -ne '1'; $i++) {
+     if ($i -eq 0) { Write-Host ('  ' + (T 'waiting for Android to finish starting')) }
+     Start-Sleep 2
+ }
++# Resolve root before anything depends on it: try the plain name, then the places Magisk keeps it when it is
++# not on PATH. Reported, so the log says which one was used.
++if (((Quiet { adb shell "$script:Su -c 'id -u'" }) -join ' ').Trim() -ne '0') {
++    foreach ($cand in @('/debug_ramdisk/su', '/sbin/su', '/system/xbin/su', '/system/bin/su')) {
++        if (((Quiet { adb shell "$cand -c 'id -u'" }) -join ' ').Trim() -eq '0') {
++            $script:Su = $cand
++            Write-Host ('  ' + (T 'root through {1}' $cand))
++            break
++        }
++    }
++}
+ if ((SuDo 'id -u') -ne '0') { Die (T 'su does not work on the device') }
+ $model = "$(SuDo 'getprop ro.product.model') / $(SuDo 'getprop ro.product.device')"
+ Write-Host (T 'device: {1}' $model)
+@@ -413,7 +428,7 @@ Write-Host (T 'device: {1}' $model)
+ $DEVICE = 'f50'
+ if ($model -match 'U30Air|U30_Air|U30 Air') {
+     $DEVICE = 'u30air'
+-} elseif ($model -notmatch 'MU300|F50|mu300') {
++} elseif ($model -notmatch 'MU300|F50|mu300|V50|MU3351') {
+     if ((Ask (T 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)') 'no') -ne 'yes') { exit 1 }
+ }
+ if ((SuDo 'getprop ro.boot.slot_suffix') -ne '_a') { Die (T 'Android must be running from slot a') }
+diff --git a/install.sh b/install.sh
+index 1b4d94a..d329fbc 100755
+--- a/install.sh
++++ b/install.sh
+@@ -118,7 +118,7 @@ echo "$(t 'device: {1}' "$model")"
+ # loads them; the boot image says which device it is for)
+ case "$model" in
+     *U30Air*|*U30_Air*|*"U30 Air"*) DEVICE=u30air ;;
+-    *MU300*|*F50*|*mu300*) DEVICE=f50 ;;
++    *MU300*|*F50*|*mu300*|*V50*|*MU3351*) DEVICE=f50 ;;
+     *) ask go "$(t 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)')" no; [ "$go" = yes ] || exit 1
+        DEVICE=f50 ;;
+ esac
+diff --git a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb b/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
+index ad67005..2aeee75 100755
+--- a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
++++ b/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
+@@ -26,6 +26,21 @@ if [ -e /sys/class/net/rndis0 ]; then
+ 	ip link set rndis0 master br-lan 2>/dev/null
+ 	ip link set rndis0 up 2>/dev/null
+ fi
++# ... and the same address check once more, now that rndis0 is a port.
++#
++# The loop above only looks at netdevs that are already ports of br-lan, and rndis0 was put into
++# br-lan on the line before this one - so on a system whose gadget is RNDIS it was never checked.
++# Left holding the early server's address, the LAN subnet gets two equal routes and replies leave
++# through rndis0: a Wi-Fi client that has associated cannot even ping br-lan. (V50, 2026-10-10)
++if [ -n "$bridge_ip" ]; then
++	for nic in usb0 rndis0; do
++		ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' || continue
++		nic_ip=$(ip -4 -o addr show dev "$nic" 2>/dev/null |
++			awk -v a="${bridge_ip%/*}" '{ split($4, p, "/"); if (p[1] == a) { print $4; exit } }')
++		[ -n "$nic_ip" ] || continue
++		ip addr del "$nic_ip" dev "$nic" 2>/dev/null || true
++	done
++fi
+ 
+ # The ECM gadget was bound in the initramfs; macOS keeps the link inactive after netifd reconfigures usb0
+ # (at boot and on every network restart). Re-enumerate the gadget whenever the LAN comes up, at most every 20 s,
+diff --git a/openwrt/overlay/etc/init.d/mu300-hw b/openwrt/overlay/etc/init.d/mu300-hw
+index 61efb04..1ad8e62 100755
+--- a/openwrt/overlay/etc/init.d/mu300-hw
++++ b/openwrt/overlay/etc/init.d/mu300-hw
+@@ -6,6 +6,38 @@ export PATH="$PATH:/opt/mu300/busybox-bin"
+ # Everything here runs in the background on purpose. busybox init only spawns the consoles after sysinit has
+ # finished, so anything slow (or hanging) in here costs the device its serial console *and* its network - which
+ # is exactly what a hanging wifi-start did on the mainline kernel, leaving no way in at all.
++# Run a bring-up step under a deadline, killing the whole process tree if it overruns.
++#
++# Why this exists (V50, 2026-10-09): this script runs before netifd, and a hanging step here costs the
++# device its network and its login - busybox init only spawns the consoles after sysinit returns. The
++# SC2355/Marlin3 stack (wcn_bsp, sprd_wlan_combo) is the known offender: insmod of sprd_wlan_combo can
++# block for good on a board whose WLAN firmware differs from the tested one, and `wifi up` waits on the
++# same driver. When that happened the hotspot still associated and dnsmasq even answered DHCP, but
++# dropbear and uhttpd never came up, so the device was unreachable with nothing on screen saying why.
++# Every step is therefore bounded: whatever fails, the rest of the boot continues and the SSH console
++# stays available to look at it.
++bringup_step() {  # bringup_step DEADLINE_SECONDS NAME COMMAND...
++	_bg_deadline=$1; _bg_name=$2; shift 2
++	_bg_pid=
++	( "$@" ) >>/tmp/mu300-$_bg_name.log 2>&1 &
++	_bg_pid=$!
++	_bg_n=0
++	while kill -0 "$_bg_pid" 2>/dev/null; do
++		if [ "$_bg_n" -ge "$_bg_deadline" ]; then
++			echo "$_bg_name: exceeded ${_bg_deadline}s, killed (continuing the boot)" >>/tmp/mu300-$_bg_name.log 2>&1
++			# the step may have children (modprobe -> insmod, wifi -> hostapd): kill the group
++			kill -TERM -"$_bg_pid" 2>/dev/null || kill -TERM "$_bg_pid" 2>/dev/null
++			sleep 2
++			kill -KILL -"$_bg_pid" 2>/dev/null || kill -KILL "$_bg_pid" 2>/dev/null
++			break
++		fi
++		sleep 1
++		_bg_n=$((_bg_n + 1))
++	done
++	wait "$_bg_pid" 2>/dev/null
++	return 0
++}
++
+ boot() {
+ 	/opt/mu300/bin/mu300-led power on
+ 	/opt/mu300/bin/mu300-usb boot
+@@ -13,14 +45,15 @@ boot() {
+ }
+ 
+ hw_bringup() {
+-	/opt/mu300/bin/extra-modules >/tmp/mu300-extra-modules.log 2>&1
+-	/opt/mu300/bin/zram-start >/dev/null 2>&1
+-	/opt/mu300/bin/wifi-start >/tmp/mu300-wifi-start.log 2>&1
++	bringup_step 60 extra-modules /opt/mu300/bin/extra-modules
++	bringup_step 30 zram-start /opt/mu300/bin/zram-start
++	# the Marlin3 stack: insmod of sprd_wlan_combo can block for good, so this is the bounded one that matters
++	bringup_step 90 wifi-start /opt/mu300/bin/wifi-start
+ 	# cfg80211 looked for regulatory.db before the rootfs was mounted; load it now so hostapd sees the country rules
+-	/opt/mu300/bin/regdb-load >>/tmp/mu300-wifi-start.log 2>&1
+-	/opt/mu300/bin/openwrt-wifi-config >>/tmp/mu300-wifi-start.log 2>&1
++	bringup_step 20 regdb-load /opt/mu300/bin/regdb-load
++	bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config
+ 	# the U30 Air's NFC tag: the hotspot's name and password, if that is what it holds (see mu300-nfc)
+-	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && /opt/mu300/bin/mu300-nfc sync >/tmp/mu300-nfc.log 2>&1
++	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync
+ 	# apply the country before netifd starts hostapd, otherwise 5 GHz channels are still NO-IR under world rules
+ 	country=$(uci -q get wireless.radio0.country)
+ 	if [ -n "$country" ]; then
+@@ -29,8 +62,8 @@ hw_bringup() {
+ 	fi
+ 	# a reload does not restart a hostapd interface that went AP-DISABLED while the world regulatory domain
+ 	# was still active; one down/up right after the country is live does
+-	wifi down >>/tmp/mu300-wifi-start.log 2>&1
+-	wifi up >>/tmp/mu300-wifi-start.log 2>&1
++	bringup_step 60 wifi-down wifi down
++	bringup_step 60 wifi-up wifi up
+ }
+ 
+ start() {
+diff --git a/openwrt/overlay/etc/init.d/mu300-post b/openwrt/overlay/etc/init.d/mu300-post
+index 5624030..9f60a82 100755
+--- a/openwrt/overlay/etc/init.d/mu300-post
++++ b/openwrt/overlay/etc/init.d/mu300-post
+@@ -47,8 +47,22 @@ start_service() {
+ 	procd_set_param command /bin/sh -c "sleep 300; while :; do /opt/mu300/bin/mu300-update notice >/dev/null 2>&1 && s=21600 || s=3600; sleep \$s; done"
+ 	procd_set_param env PATH="$PATH"
+ 	procd_close_instance
++# Re-arm the Linux slot only once the device is actually reachable.
++	#
++	# Upstream does this unconditionally 30 s after the service starts, which marks a boot "good" even when
++	# OpenWrt came up but dropbear and uhttpd never did (V50, 2026-10-09). mu300-next-boot --rearm also
++	# clears the initramfs counter .mu300/boot-tries, so an unconditional re-arm resets BOTH fallback
++	# counters on every boot and the device can never return to Android on its own - power cycling stops
++	# helping entirely. Ubuntu's mu300-boot-ok waits for the USB network and SSH first; do the same here.
++	# ':0016 .* 0A' is a listening socket on port 22 in /proc/net/tcp.
+ 	procd_open_instance bootok
+-	procd_set_param command /bin/sh -c "sleep 30; exec /opt/mu300/bin/mu300-next-boot --rearm"
++	procd_set_param command /bin/sh -c "for i in $(seq 1 10); do grep -q ':0016 .* 0A ' /proc/net/tcp && { exec /opt/mu300/bin/mu300-next-boot --rearm; }; sleep 30; done; logger -t mu300-post 'no SSH after 5 min: not re-arming (the next boot returns to Android)'"
++	procd_set_param env PATH="$PATH"
++	procd_close_instance
++	# Once per boot: record (and if needed repair) what decides whether a Wi-Fi client gets an address.
++	# See opt/mu300/bin/mu300-lancheck - without it a boot that serves nobody looks identical to a good one.
++	procd_open_instance lancheck
++	procd_set_param command /opt/mu300/bin/mu300-lancheck
+ 	procd_set_param env PATH="$PATH"
+ 	procd_close_instance
+ }
+diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
+index 2aab62b..89f4a0a 100755
+--- a/openwrt/overlay/etc/uci-defaults/90-mu300
++++ b/openwrt/overlay/etc/uci-defaults/90-mu300
+@@ -99,6 +99,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
+ 	uci set firewall.$early.output='ACCEPT'
+ 	uci set firewall.$early.forward='REJECT'
+ fi
++# K28 (V50, 2026-10-10): the lan zone has to own the bridge itself, not only its ports.
++#
++# fw4 derives a zone's interfaces from the ports of the network's bridge device. br-lan is declared
++# bridge_empty, and wlan0 only joins it when netifd brings the AP up - after fw4 has rendered the
++# ruleset. The lan zone then owns nothing: no jump for br-lan in the input chain, policy drop, and
++# every packet a client sends is discarded. Nothing reports it - /etc/config/firewall says
++# input='ACCEPT' either way, the AP is up and dnsmasq is listening - so a client that associates simply
++# never gets a lease. Naming the bridge costs nothing and a later port cannot undo it.
++lan_dev=$(uci -q get network.lan.device)
++if [ -n "$lan_dev" ]; then
++	for z in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)\.name='lan'$/\1/p"); do
++		uci -q get "firewall.$z.device" | grep -qx "$lan_dev" || uci add_list "firewall.$z.device=$lan_dev"
++	done
++fi
+ # LuCI's language (both systems) is English, not "auto" (which follows the browser): once, with its own marker
+ # luci.mu300.lang, so a language the user picks later stays through every update. A system from before the marker
+ # that still says "auto" (or nothing) gets English too: auto was nobody's choice there (luci-base's default, and
+@@ -138,4 +152,4 @@ set system.mu300.defaults='1'
+ UCI
+ 	uci commit system
+ fi
+-exit 0
++exit 0
+\ No newline at end of file
+diff --git a/openwrt/overlay/opt/mu300/bin/mu300-lancheck b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
+new file mode 100644
+index 0000000..9cf7134
+--- /dev/null
++++ b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
+@@ -0,0 +1,59 @@
++#!/bin/sh
++# Report - and if needed repair - the LAN path a client depends on, once per boot.
++#
++# Why this exists (V50, 2026-10-09): a client could associate with the hotspot and then get nothing at all.
++# Every part that decides whether it gets an address looked right afterwards - wlan0 a port of br-lan,
++# br-lan at 192.168.77.1/24, dhcp.lan a dhcpv4 server, dnsmasq running - but nothing recorded the state
++# AT BOOT, so a broken boot could not be told from a working one. The kernel log only showed the port
++# reaching forwarding state, and the userspace log had been flooded out of the ring buffer by the
++# sprd-wlan driver before anything could read it.
++#
++# The one thing this originally got wrong is the thing that actually broke the device: "the lan zone
++# accepting input" was read out of /etc/config/firewall, where it is an option that was set. In the
++# RENDERED ruleset the lan zone owned no interface at all, so fw4's input chain had no jump for
++# br-lan and its policy dropped everything a client sent. UCI said ACCEPT; nothing on the device
++# said otherwise. Hence fw-jump below, which reads the ruleset rather than the configuration.
++#
++# So: one line per boot with those facts, written to a file and to syslog. The next boot either proves the
++# path works or names the one part that does not.
++LOG=/tmp/mu300-lancheck.log
++say() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >>$LOG 2>/dev/null; logger -t mu300-lancheck "$*" 2>/dev/null; }
++
++# netifd runs after mu300-post in the boot order; wait for the LAN to get its address (up to 2 minutes)
++i=0
++while [ $i -lt 24 ]; do
++    ip -4 addr show br-lan 2>/dev/null | grep -q 'inet ' && break
++    sleep 5
++    i=$((i + 1))
++done
++
++# The hotspot must be a port of the LAN bridge; a client that is not attached to it can associate with the
++# AP and still reach nothing. If it is missing, start Wi-Fi again so netifd attaches it.
++if [ -d /sys/class/net/wlan0 ] && [ ! -e /sys/class/net/br-lan/brif/wlan0 ]; then
++    say "wlan0 is not a port of br-lan: starting Wi-Fi again so netifd attaches it"
++    wifi up 2>/dev/null
++    sleep 20
++fi
++
++br=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\/[0-9]*\).*/\1/p' | tr '\n' ' ')
++ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')
++wst=$(cat /sys/class/net/wlan0/operstate 2>/dev/null)
++dm=$(pgrep dnsmasq 2>/dev/null | tr '\n' ' ')
++# Listening sockets, hex ports. 0016 = 22 ssh and 0050 = 80 http are TCP and live in /proc/net/tcp;
++# 0043 = 67 dhcp is UDP and lives in /proc/net/udp. Reading 67 out of /proc/net/tcp (as this did until
++# 2026-10-10) can only ever answer "nothing is listening", however healthy the DHCP server is.
++l22=$(grep -c ':0016 .* 0A ' /proc/net/tcp 2>/dev/null)
++l80=$(grep -c ':0050 .* 0A ' /proc/net/tcp 2>/dev/null)
++l67=$(grep -c ':0043 .* 0A ' /proc/net/udp 2>/dev/null)
++# The range dnsmasq was actually started with, not the one /etc/config/dhcp asks for. The generated file
++# has no fixed name (netifd writes /var/etc/dnsmasq.conf.cfg<hash>), so glob it without demanding a suffix.
++rng=$(grep -h '^dhcp-range' /var/etc/dnsmasq.conf* 2>/dev/null | tr '\n' ';')
++# Does fw4's input chain even hand br-lan to the lan zone? This is the one that decides everything:
++# fw4 works out a zone's devices from the ports of its bridge, and br-lan is declared bridge_empty with
++# wlan0 joining only when netifd brings the AP up. When that moment came too late the lan zone owned
++# nothing, the input policy dropped every packet, and a client that had associated got no lease, no DNS,
++# no LuCI and no SSH - while dnsmasq sat on 0.0.0.0:67 with a correct dhcp-range and never saw a
++# DISCOVER. Nothing else on the device looks wrong when that happens, which is why it is reported here.
++lanif=$(uci -q get network.lan.device 2>/dev/null)
++fwlan=$(nft list chain inet fw4 input 2>/dev/null | grep -c "\"${lanif:-br-lan}\" jump")
++say "br-lan=[$br] ports=[$ports] wlan0=$wst dnsmasq=[$dm] tcp22=$l22 tcp80=$l80 udp67=$l67 fw-jump=$fwlan range=[$rng]"
+\ No newline at end of file
+diff --git a/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb b/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb
+new file mode 100644
+index 0000000..ad67005
+--- /dev/null
++++ b/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb
+@@ -0,0 +1,49 @@
++#!/bin/sh
++# MU300: the LAN is up - the hand-over from the early DHCP server, then the macOS re-enumeration.
++[ "$ACTION" = ifup ] && [ "$INTERFACE" = lan ] || exit 0
++
++# K9 (ported from the kanoqwq fork, cd4fb28 and 4e70d02): dnsmasq serves the LAN now, so the early server of
++# preinit (06_mu300_early_usb) goes. Then the address boot/init and preinit put on the gadget's netdev: netifd can leave it
++# there after enslaving the netdev to br-lan, which makes two equal routes for the LAN subnet; replies then leave
++# through the wrong device and the host cannot even ping br-lan. It is taken off a bridge port only when it is the
++# bridge's own, after netifd has put that on br-lan. And rndis0: an installed system's bridge section may predate a
++# switch to RNDIS, so it is put back into br-lan on every LAN ifup (a network reload too).
++pid=$(cat /run/mu300-early-udhcpd.pid 2>/dev/null)
++[ -n "$pid" ] && kill "$pid" 2>/dev/null
++rm -f /run/mu300-early-udhcpd.pid
++bridge_ip=$(ip -4 -o addr show dev br-lan 2>/dev/null | awk 'NR == 1 { print $4 }')
++if [ -n "$bridge_ip" ]; then
++	for nic in usb0 rndis0; do
++		ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' || continue
++		# the bridge's address with whatever prefix the port has (preinit's mask can differ from netifd's)
++		nic_ip=$(ip -4 -o addr show dev "$nic" 2>/dev/null |
++			awk -v a="${bridge_ip%/*}" '{ split($4, p, "/"); if (p[1] == a) { print $4; exit } }')
++		[ -n "$nic_ip" ] || continue
++		ip addr del "$nic_ip" dev "$nic" 2>/dev/null || true
++	done
++fi
++if [ -e /sys/class/net/rndis0 ]; then
++	ip link set rndis0 master br-lan 2>/dev/null
++	ip link set rndis0 up 2>/dev/null
++fi
++
++# The ECM gadget was bound in the initramfs; macOS keeps the link inactive after netifd reconfigures usb0
++# (at boot and on every network restart). Re-enumerate the gadget whenever the LAN comes up, at most every 20 s,
++# so the host starts DHCP on a fresh link. (Kept, K10: the fork replaces it with one rebind in mu300-post, K12,
++# which waits for its gate on macOS.)
++stamp=/tmp/mu300-usb-rebound
++now=$(cut -d. -f1 /proc/uptime)
++[ -e $stamp ] && [ $((now - $(cat $stamp))) -lt 20 ] && exit 0
++echo "$now" > $stamp
++C=/sys/kernel/config
++grep -q " $C configfs" /proc/mounts || mount -t configfs configfs $C 2>/dev/null
++g=$C/usb_gadget/linux
++[ -e $g/UDC ] || exit 0
++udc=$(cat $g/UDC)
++[ -n "$udc" ] || udc=$(ls /sys/class/udc | head -1)
++(
++	sleep 2
++	echo "" > $g/UDC 2>/dev/null
++	sleep 1
++	echo "$udc" > $g/UDC && logger -t mu300 "usb gadget re-enumerated on $udc"
++) &
+diff --git a/openwrt/vendor-extra/etc/init.d/mu300-hw b/openwrt/vendor-extra/etc/init.d/mu300-hw
+new file mode 100644
+index 0000000..1ad8e62
+--- /dev/null
++++ b/openwrt/vendor-extra/etc/init.d/mu300-hw
+@@ -0,0 +1,71 @@
++#!/bin/sh /etc/rc.common
++# Hardware bring-up before netifd: vendor drivers, zram, Wi-Fi (SC2355), first-boot Wi-Fi config, Bluetooth off
++START=12
++export PATH="$PATH:/opt/mu300/busybox-bin"
++
++# Everything here runs in the background on purpose. busybox init only spawns the consoles after sysinit has
++# finished, so anything slow (or hanging) in here costs the device its serial console *and* its network - which
++# is exactly what a hanging wifi-start did on the mainline kernel, leaving no way in at all.
++# Run a bring-up step under a deadline, killing the whole process tree if it overruns.
++#
++# Why this exists (V50, 2026-10-09): this script runs before netifd, and a hanging step here costs the
++# device its network and its login - busybox init only spawns the consoles after sysinit returns. The
++# SC2355/Marlin3 stack (wcn_bsp, sprd_wlan_combo) is the known offender: insmod of sprd_wlan_combo can
++# block for good on a board whose WLAN firmware differs from the tested one, and `wifi up` waits on the
++# same driver. When that happened the hotspot still associated and dnsmasq even answered DHCP, but
++# dropbear and uhttpd never came up, so the device was unreachable with nothing on screen saying why.
++# Every step is therefore bounded: whatever fails, the rest of the boot continues and the SSH console
++# stays available to look at it.
++bringup_step() {  # bringup_step DEADLINE_SECONDS NAME COMMAND...
++	_bg_deadline=$1; _bg_name=$2; shift 2
++	_bg_pid=
++	( "$@" ) >>/tmp/mu300-$_bg_name.log 2>&1 &
++	_bg_pid=$!
++	_bg_n=0
++	while kill -0 "$_bg_pid" 2>/dev/null; do
++		if [ "$_bg_n" -ge "$_bg_deadline" ]; then
++			echo "$_bg_name: exceeded ${_bg_deadline}s, killed (continuing the boot)" >>/tmp/mu300-$_bg_name.log 2>&1
++			# the step may have children (modprobe -> insmod, wifi -> hostapd): kill the group
++			kill -TERM -"$_bg_pid" 2>/dev/null || kill -TERM "$_bg_pid" 2>/dev/null
++			sleep 2
++			kill -KILL -"$_bg_pid" 2>/dev/null || kill -KILL "$_bg_pid" 2>/dev/null
++			break
++		fi
++		sleep 1
++		_bg_n=$((_bg_n + 1))
++	done
++	wait "$_bg_pid" 2>/dev/null
++	return 0
++}
++
++boot() {
++	/opt/mu300/bin/mu300-led power on
++	/opt/mu300/bin/mu300-usb boot
++	hw_bringup > /tmp/mu300-hw.log 2>&1 &
++}
++
++hw_bringup() {
++	bringup_step 60 extra-modules /opt/mu300/bin/extra-modules
++	bringup_step 30 zram-start /opt/mu300/bin/zram-start
++	# the Marlin3 stack: insmod of sprd_wlan_combo can block for good, so this is the bounded one that matters
++	bringup_step 90 wifi-start /opt/mu300/bin/wifi-start
++	# cfg80211 looked for regulatory.db before the rootfs was mounted; load it now so hostapd sees the country rules
++	bringup_step 20 regdb-load /opt/mu300/bin/regdb-load
++	bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config
++	# the U30 Air's NFC tag: the hotspot's name and password, if that is what it holds (see mu300-nfc)
++	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync
++	# apply the country before netifd starts hostapd, otherwise 5 GHz channels are still NO-IR under world rules
++	country=$(uci -q get wireless.radio0.country)
++	if [ -n "$country" ]; then
++		iw reg set "$country"
++		for n in $(seq 1 10); do iw reg get | grep -q "country $country:" && break; sleep 1; done
++	fi
++	# a reload does not restart a hostapd interface that went AP-DISABLED while the world regulatory domain
++	# was still active; one down/up right after the country is live does
++	bringup_step 60 wifi-down wifi down
++	bringup_step 60 wifi-up wifi up
++}
++
++start() {
++	boot
++}
+diff --git a/openwrt/vendor-extra/etc/init.d/mu300-post b/openwrt/vendor-extra/etc/init.d/mu300-post
+new file mode 100644
+index 0000000..9f60a82
+--- /dev/null
++++ b/openwrt/vendor-extra/etc/init.d/mu300-post
+@@ -0,0 +1,68 @@
++#!/bin/sh /etc/rc.common
++# After boot: keep mobile data up across modem resets, and mark the boot successful (re-arm the Linux slot if Linux
++# is the default)
++START=99
++USE_PROCD=1
++export PATH="$PATH:/opt/mu300/busybox-bin"
++
++# LuCI (or "uci commit wireless; reload_config") turning the hotspot off or on: no hostapd hook tells mu300-led,
++# so the Wi-Fi LED follows what wlan0 is for two minutes: Wi-Fi turned off and on again at once took hostapd 63 s
++# to come back on F50 #1 (6.18). (A reload only runs this.)
++service_triggers() {
++	procd_add_reload_trigger wireless
++}
++
++reload_service() {
++	( sleep 5; /opt/mu300/bin/mu300-led wifi sync 120 ) >/dev/null 2>&1 &
++}
++
++start_service() {
++	# the commands on the PATH (/usr/bin): new ones on a system installed before they existed, and the extras'
++	/opt/mu300/bin/mu300-extra link >/dev/null 2>&1
++
++	# the host gives up asking for a DHCP lease long before this device finishes booting; if nothing took an
++	# address, make the gadget re-enumerate once, which looks like a fresh cable to the host
++	procd_open_instance usb-lease
++	procd_set_param command /opt/mu300/bin/mu300-usb-reset --if-no-lease 25
++	procd_close_instance
++	# K13 (ported from the kanoqwq fork, cd4fb28): the U30 Air has a second gadget netdev on some kernels; it
++	# belongs to the LAN like usb0
++	[ -e /sys/class/net/usb1 ] && ip link set usb1 master br-lan 2>/dev/null && ip link set usb1 up
++
++	procd_open_instance cellwatch
++	procd_set_param command /opt/mu300/bin/mobile-data watch
++	procd_set_param env MU300_NETIFD=1 PATH="$PATH"
++	procd_set_param respawn 3600 30 0
++	procd_close_instance
++	procd_open_instance thermalguard
++	procd_set_param command /opt/mu300/bin/thermal-guard
++	procd_set_param env PATH="$PATH"
++	procd_close_instance
++	# the SC2355 sometimes refuses the first IFF_UP (EIO); if the AP did not come up, try once more
++	procd_open_instance wifiretry
++	procd_set_param command /bin/sh -c "sleep 45; [ -e /sys/class/net/wlan0 ] || exit 0; ubus call hostapd.wlan0 get_status >/dev/null 2>&1 || { logger -t mu300-post 'AP not up, retrying'; wifi up; sleep 15; }; /opt/mu300/bin/mu300-led wifi sync"
++	procd_close_instance
++	# a newer release: a note at login (/etc/profile.d/mu300-update.sh) and in mu300-toolkit, nothing installed
++	procd_open_instance updatenotice
++	procd_set_param command /bin/sh -c "sleep 300; while :; do /opt/mu300/bin/mu300-update notice >/dev/null 2>&1 && s=21600 || s=3600; sleep \$s; done"
++	procd_set_param env PATH="$PATH"
++	procd_close_instance
++# Re-arm the Linux slot only once the device is actually reachable.
++	#
++	# Upstream does this unconditionally 30 s after the service starts, which marks a boot "good" even when
++	# OpenWrt came up but dropbear and uhttpd never did (V50, 2026-10-09). mu300-next-boot --rearm also
++	# clears the initramfs counter .mu300/boot-tries, so an unconditional re-arm resets BOTH fallback
++	# counters on every boot and the device can never return to Android on its own - power cycling stops
++	# helping entirely. Ubuntu's mu300-boot-ok waits for the USB network and SSH first; do the same here.
++	# ':0016 .* 0A' is a listening socket on port 22 in /proc/net/tcp.
++	procd_open_instance bootok
++	procd_set_param command /bin/sh -c "for i in $(seq 1 10); do grep -q ':0016 .* 0A ' /proc/net/tcp && { exec /opt/mu300/bin/mu300-next-boot --rearm; }; sleep 30; done; logger -t mu300-post 'no SSH after 5 min: not re-arming (the next boot returns to Android)'"
++	procd_set_param env PATH="$PATH"
++	procd_close_instance
++	# Once per boot: record (and if needed repair) what decides whether a Wi-Fi client gets an address.
++	# See opt/mu300/bin/mu300-lancheck - without it a boot that serves nobody looks identical to a good one.
++	procd_open_instance lancheck
++	procd_set_param command /opt/mu300/bin/mu300-lancheck
++	procd_set_param env PATH="$PATH"
++	procd_close_instance
++}
+diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
+new file mode 100644
+index 0000000..89f4a0a
+--- /dev/null
++++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
+@@ -0,0 +1,155 @@
++#!/bin/sh
++# The MU300's OpenWrt settings: what the system needs on every run, and first-install defaults once.
++#
++# This runs more than once: mu300-update apply and android-install.sh UPDATE=1 unpack a fresh rootfs (which carries
++# /etc/uci-defaults again) and keep /etc/config, so it runs on the first boot after every update, against the
++# user's settings.
++#
++# Once (a first install): one LAN for USB and Wi-Fi (192.168.77.1/24 on an F50, 192.168.78.1/24 on a U30 Air) with
++# the USB gadget in its bridge, no wan6, an empty APN, the hostname and time zone, and fw4's software flowtable. The
++# marker system.mu300.defaults is written last, in /etc/config with the settings it guards: an update keeps both, a
++# fresh or reset configuration has neither and gets the defaults again.
++# An install from before the marker is told by its wan: only this script makes wan the modem's (proto mu300cell),
++# and no first boot has that, so such a configuration was set up by an earlier run and keeps its settings. It gets
++# the one default the releases before the marker did not set (the flowtable), and the marker.
++#
++# Every run: wan is the modem's, the LAN bridge does not wait for a missing member, the USB host's pinned lease when
++# there is none (K25), the early USB path's firewall zone (K26), and the USB serial console in the fresh inittab.
++lan_ip=$(/opt/mu300/bin/mu300-lan-ip)
++# The USB host's MAC (K25): boot/init leaves it in /run (the gadget's host_addr); else the gadget's own address
++# tells it (init gives the host the next one: :01 -> :02 for usb0, :03 -> :04 for rndis0).
++usb_host_mac=$(cat /run/mu300-usb-host-mac 2>/dev/null)
++for nic in usb0:02 rndis0:04; do
++	[ -z "$usb_host_mac" ] || break
++	devmac=$(cat /sys/class/net/${nic%:*}/address 2>/dev/null)
++	[ -n "$devmac" ] && usb_host_mac=${devmac%:*}:${nic#*:}
++done
++dev=$(uci -q show network | sed -n "s/^network\.\(@device\[[0-9]*\]\)\.name='br-lan'$/\1/p" | head -1)
++
++# first (a first install), old (an install from before the marker) or done; told before wan is set below
++if [ "$(uci -q get system.mu300.defaults)" = 1 ]; then run=done
++elif [ "$(uci -q get network.wan.proto)" = mu300cell ]; then run=old
++else run=first
++fi
++
++if [ "$run" = first ]; then
++	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
++	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
++	uci -q batch <<UCI
++set system.@system[0].hostname='mu300'
++set system.@system[0].zonename='Europe/Istanbul'
++set system.@system[0].timezone='<+03>-3'
++set network.lan.ipaddr='$lan_ip'
++set network.lan.netmask='255.255.255.0'
++set network.lan.ip6assign='64'
++delete network.wan6
++set network.wan=interface
++set network.wan.apn=''
++UCI
++	# the armsr default bridges eth0; the MU300 LAN bridge carries the USB gadget (Wi-Fi joins via wireless config)
++	if [ -n "$dev" ]; then
++		uci -q delete network.$dev.ports
++		uci add_list network.$dev.ports='usb0'
++		# the gadget's RNDIS netdev (Windows without NCM) exists only when init made RNDIS; the LAN hook
++		# (hotplug.d/iface/10-mu300-usb) bridges it when a later boot does (K27, kanoqwq fork cd4fb28 and 4e70d02)
++		[ -e /sys/class/net/rndis0 ] && uci add_list network.$dev.ports='rndis0'
++	fi
++fi
++if [ "$run" != done ]; then
++	# Forwarded TCP/UDP through the kernel's software flowtable (fw4 puts sipa_eth0 in it: patches/fw4-sipa-offload.patch).
++	# The Unisoc SIPA and SC2355 drivers have no nftables hardware flow offload. (mu300-ttl turns it off while a TTL
++	# is set.)
++	uci -q set firewall.@defaults[0].flow_offloading='1'
++	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
++fi
++
++# --- every run
++uci -q batch <<UCI
++set network.wan=interface
++set network.wan.proto='mu300cell'
++UCI
++# the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)
++[ -z "$dev" ] || uci set network.$dev.bridge_empty='1'
++# K25 (ported from the kanoqwq fork, cd4fb28): the USB host keeps the address it had from the early server, and
++# dnsmasq broadcasts its OFFER/ACK: Windows can keep asking for the early lease after it has already removed that
++# address, and a unicast reply to the removed address is lost in the NCM host stack. The address is the one preinit's
++# early server gives on the LAN as configured (lib/mu300/usb-host.sh: never the router's own). Added when there is
++# none (an install from before K25, or a host MAC not known yet); one that is there is left as it is.
++. /lib/mu300/usb-host.sh
++if [ -n "$usb_host_mac" ] && [ -z "$(uci -q get dhcp.mu300_usb)" ]; then
++	mu300_lan "$(uci -q get network.lan.ipaddr)" "$(uci -q get network.lan.netmask)"
++	usb_host_ip=$(mu300_usb_host_ip "${mu300_lan_addr:-$lan_ip}" "$mu300_lan_mask")
++	uci -q batch <<UCI
++set dhcp.mu300_usb=host
++set dhcp.mu300_usb.name='mu300-usb-host'
++set dhcp.mu300_usb.mac='$usb_host_mac'
++set dhcp.mu300_usb.ip='$usb_host_ip'
++set dhcp.mu300_usb.broadcast='1'
++UCI
++fi
++# K26 (same fork commit): before netifd makes br-lan, the early address lives on the gadget's netdev itself (preinit
++# 06_mu300_early_usb); the host's DHCP and management traffic there gets the LAN's input policy, never forwarding.
++# Bridged, the packets come in through br-lan as usual. Added once.
++if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'$"; then
++	early=$(uci add firewall zone)
++	uci set firewall.$early.name='earlyusb'
++	uci add_list firewall.$early.device='usb0'
++	uci add_list firewall.$early.device='rndis0'
++	uci set firewall.$early.input='ACCEPT'
++	uci set firewall.$early.output='ACCEPT'
++	uci set firewall.$early.forward='REJECT'
++fi
++# K28 (V50, 2026-10-10): the lan zone has to own the bridge itself, not only its ports.
++#
++# fw4 derives a zone's interfaces from the ports of the network's bridge device. br-lan is declared
++# bridge_empty, and wlan0 only joins it when netifd brings the AP up - after fw4 has rendered the
++# ruleset. The lan zone then owns nothing: no jump for br-lan in the input chain, policy drop, and
++# every packet a client sends is discarded. Nothing reports it - /etc/config/firewall says
++# input='ACCEPT' either way, the AP is up and dnsmasq is listening - so a client that associates simply
++# never gets a lease. Naming the bridge costs nothing and a later port cannot undo it.
++lan_dev=$(uci -q get network.lan.device)
++if [ -n "$lan_dev" ]; then
++	for z in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)\.name='lan'$/\1/p"); do
++		uci -q get "firewall.$z.device" | grep -qx "$lan_dev" || uci add_list "firewall.$z.device=$lan_dev"
++	done
++fi
++# LuCI's language (both systems) is English, not "auto" (which follows the browser): once, with its own marker
++# luci.mu300.lang, so a language the user picks later stays through every update. A system from before the marker
++# that still says "auto" (or nothing) gets English too: auto was nobody's choice there (luci-base's default, and
++# 91-mu300-luci's until it set English), and with the Turkish and Chinese catalogs now in the image it would switch
++# the language under the user. A language set on purpose stays.
++# The languages the image has catalogs for (Turkish and Chinese) are offered on every run: their own uci-defaults ran
++# when the image was built, and an update keeps the old /etc/config/luci, which may not know them (plain OpenWrt
++# before v2026.10.11 had none). One the user's configuration has stays as it is.
++if uci -q get luci.main >/dev/null; then
++	uci -q get luci.languages >/dev/null || uci -q set luci.languages=internal
++	[ ! -e /usr/lib/lua/luci/i18n/base.tr.lmo ] || uci -q get luci.languages.tr >/dev/null ||
++		uci -q set luci.languages.tr='Türkçe (Turkish)'
++	[ ! -e /usr/lib/lua/luci/i18n/base.zh-cn.lmo ] || uci -q get luci.languages.zh_cn >/dev/null ||
++		uci -q set luci.languages.zh_cn="$(printf '\347\256\200\344\275\223\344\270\255\346\226\207 (Simplified Chinese)')"
++	uci commit luci
++fi
++if uci -q get luci.main >/dev/null && [ "$(uci -q get luci.mu300.lang)" != 1 ]; then
++	case $(uci -q get luci.main.lang) in ''|auto) uci -q set luci.main.lang='en' ;; esac
++	uci -q batch <<UCI
++set luci.mu300=mu300
++set luci.mu300.lang='1'
++UCI
++	uci commit luci
++fi
++# network last: a first run cut short before its commit has no wan proto mu300cell yet, and runs again as a first
++# install, in full
++uci commit system
++uci commit dhcp
++uci commit firewall
++uci commit network
++grep -q '^ttyGS0:' /etc/inittab || echo 'ttyGS0::askfirst:/usr/libexec/login.sh' >> /etc/inittab
++# the marker last
++if [ "$run" != done ]; then
++	uci -q batch <<UCI
++set system.mu300=mu300
++set system.mu300.defaults='1'
++UCI
++	uci commit system
++fi
++exit 0
+\ No newline at end of file
+diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
+new file mode 100644
+index 0000000..9cf7134
+--- /dev/null
++++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
+@@ -0,0 +1,59 @@
++#!/bin/sh
++# Report - and if needed repair - the LAN path a client depends on, once per boot.
++#
++# Why this exists (V50, 2026-10-09): a client could associate with the hotspot and then get nothing at all.
++# Every part that decides whether it gets an address looked right afterwards - wlan0 a port of br-lan,
++# br-lan at 192.168.77.1/24, dhcp.lan a dhcpv4 server, dnsmasq running - but nothing recorded the state
++# AT BOOT, so a broken boot could not be told from a working one. The kernel log only showed the port
++# reaching forwarding state, and the userspace log had been flooded out of the ring buffer by the
++# sprd-wlan driver before anything could read it.
++#
++# The one thing this originally got wrong is the thing that actually broke the device: "the lan zone
++# accepting input" was read out of /etc/config/firewall, where it is an option that was set. In the
++# RENDERED ruleset the lan zone owned no interface at all, so fw4's input chain had no jump for
++# br-lan and its policy dropped everything a client sent. UCI said ACCEPT; nothing on the device
++# said otherwise. Hence fw-jump below, which reads the ruleset rather than the configuration.
++#
++# So: one line per boot with those facts, written to a file and to syslog. The next boot either proves the
++# path works or names the one part that does not.
++LOG=/tmp/mu300-lancheck.log
++say() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >>$LOG 2>/dev/null; logger -t mu300-lancheck "$*" 2>/dev/null; }
++
++# netifd runs after mu300-post in the boot order; wait for the LAN to get its address (up to 2 minutes)
++i=0
++while [ $i -lt 24 ]; do
++    ip -4 addr show br-lan 2>/dev/null | grep -q 'inet ' && break
++    sleep 5
++    i=$((i + 1))
++done
++
++# The hotspot must be a port of the LAN bridge; a client that is not attached to it can associate with the
++# AP and still reach nothing. If it is missing, start Wi-Fi again so netifd attaches it.
++if [ -d /sys/class/net/wlan0 ] && [ ! -e /sys/class/net/br-lan/brif/wlan0 ]; then
++    say "wlan0 is not a port of br-lan: starting Wi-Fi again so netifd attaches it"
++    wifi up 2>/dev/null
++    sleep 20
++fi
++
++br=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\/[0-9]*\).*/\1/p' | tr '\n' ' ')
++ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')
++wst=$(cat /sys/class/net/wlan0/operstate 2>/dev/null)
++dm=$(pgrep dnsmasq 2>/dev/null | tr '\n' ' ')
++# Listening sockets, hex ports. 0016 = 22 ssh and 0050 = 80 http are TCP and live in /proc/net/tcp;
++# 0043 = 67 dhcp is UDP and lives in /proc/net/udp. Reading 67 out of /proc/net/tcp (as this did until
++# 2026-10-10) can only ever answer "nothing is listening", however healthy the DHCP server is.
++l22=$(grep -c ':0016 .* 0A ' /proc/net/tcp 2>/dev/null)
++l80=$(grep -c ':0050 .* 0A ' /proc/net/tcp 2>/dev/null)
++l67=$(grep -c ':0043 .* 0A ' /proc/net/udp 2>/dev/null)
++# The range dnsmasq was actually started with, not the one /etc/config/dhcp asks for. The generated file
++# has no fixed name (netifd writes /var/etc/dnsmasq.conf.cfg<hash>), so glob it without demanding a suffix.
++rng=$(grep -h '^dhcp-range' /var/etc/dnsmasq.conf* 2>/dev/null | tr '\n' ';')
++# Does fw4's input chain even hand br-lan to the lan zone? This is the one that decides everything:
++# fw4 works out a zone's devices from the ports of its bridge, and br-lan is declared bridge_empty with
++# wlan0 joining only when netifd brings the AP up. When that moment came too late the lan zone owned
++# nothing, the input policy dropped every packet, and a client that had associated got no lease, no DNS,
++# no LuCI and no SSH - while dnsmasq sat on 0.0.0.0:67 with a correct dhcp-range and never saw a
++# DISCOVER. Nothing else on the device looks wrong when that happens, which is why it is reported here.
++lanif=$(uci -q get network.lan.device 2>/dev/null)
++fwlan=$(nft list chain inet fw4 input 2>/dev/null | grep -c "\"${lanif:-br-lan}\" jump")
++say "br-lan=[$br] ports=[$ports] wlan0=$wst dnsmasq=[$dm] tcp22=$l22 tcp80=$l80 udp67=$l67 fw-jump=$fwlan range=[$rng]"
+\ No newline at end of file
+diff --git a/rootfs/overlay/opt/mu300/bin/wifi-start b/rootfs/overlay/opt/mu300/bin/wifi-start
+index 3867c7d..e1d8e61 100755
+--- a/rootfs/overlay/opt/mu300/bin/wifi-start
++++ b/rootfs/overlay/opt/mu300/bin/wifi-start
+@@ -19,8 +19,7 @@ for m in wcn_bsp sprd_wlan_combo; do
+     [ -f "$f" ] || f=$K/extra/$m.ko
+     [ -f "$f" ] || { echo "missing $m.ko" >&2; exit 1; }
+     insmod "$f"
+-done
+-for n in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
++donefor n in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
+ # wcn_bsp turns the Marlin3 firmware (ARM) log on at boot; every firmware log packet is printed to the kernel log
+ [ -w /proc/mdbg/at_cmd ] && printf 'at+armlog=0\r' > /proc/mdbg/at_cmd 2>/dev/null || true
+ ls /sys/class/net
+diff --git a/tools/vendor-overlay.py b/tools/vendor-overlay.py
+index 6f41d05..8b3d7d3 100755
+--- a/tools/vendor-overlay.py
++++ b/tools/vendor-overlay.py
+@@ -130,6 +130,47 @@ def add_members(tar, src: Path, dest: str, seen: set, rename=None):
+     return n
+ 
+ 
++def add_overlay_tree(tar, src: Path, seen: set):
++    """Pack a rootfs overlay: every path in src is relative to the system root (etc/init.d/..., opt/...).
++
++    This is how a change to the OpenWrt image reaches a machine installed from a PREBUILT release. The
++    release's rootfs tarball is downloaded as-is and openwrt/overlay/ is only read by openwrt/build-rootfs.sh
++    when the image is built from source - so editing that tree alone has no effect on an install. The vendor
++    overlay, however, is built here on the host and android-install.sh unpacks it OVER the system (after the
++    rootfs), so what it carries wins.
++
++    Modes: Windows cannot store them, and add_tree would write 0644 for every file - which strips the
++    executable bit off an init script and leaves the boot broken. Paths that are executed on the device
++    therefore get 0755 explicitly.
++    """
++    exe_dirs = ('etc/init.d/', 'etc/uci-defaults/', 'etc/hotplug.d/', 'etc/rc.d/',
++                'opt/mu300/bin/', 'opt/mu300/busybox-bin/', 'lib/', 'usr/')
++    for root, dirs, files in os.walk(src, followlinks=False):
++        dirs.sort()
++        rel_root = Path(root).relative_to(src)
++        for name in dirs:
++            arc = (rel_root / name).as_posix()
++            if arc in seen:
++                continue
++            seen.add(arc)
++            info = tarfile.TarInfo(arc)
++            info.type, info.mode, info.uid, info.gid = tarfile.DIRTYPE, 0o755, 0, 0
++            info.uname = info.gname = 'root'
++            tar.addfile(info)
++        for name in sorted(files):
++            path = Path(root) / name
++            arc = (rel_root / name).as_posix()
++            if arc in seen:
++                continue
++            seen.add(arc)
++            data = path.read_bytes()
++            mode = 0o755 if arc.startswith(exe_dirs) else 0o644
++            info = tarfile.TarInfo(arc)
++            info.size, info.mode, info.uid, info.gid = len(data), mode, 0, 0
++            info.uname = info.gname = 'root'
++            tar.addfile(info, io.BytesIO(data))
++
++
+ def main():
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument('--os', required=True, choices=['ubuntu', 'openwrt', 'openwrt-luci'])
+@@ -168,6 +209,14 @@ def main():
+         if a.kernel_bundle:
+             krel, n = add_kernel_bundle(tar, a.kernel_bundle, a.os, seen)
+             print(f'{a.out}: {n} modules for {krel}')
++        # The fork's own changes to the OpenWrt image (see add_overlay_tree). Auto-detected next to this
++        # script so that no installer change is needed: openwrt/vendor-extra/ is populated by
++        # tools/apply-v50-patches.ps1, which mirrors every file it patches into that tree.
++        extra = Path(__file__).resolve().parent.parent / 'openwrt' / 'vendor-extra'
++        if a.os.startswith('openwrt') and extra.is_dir():
++            n = len(seen)
++            add_overlay_tree(tar, extra, seen)
++            print(f'{a.out}: {len(seen) - n} entries from {extra}')
+     print(f'{a.out}: {len(seen)} entries')
+ 
+ 

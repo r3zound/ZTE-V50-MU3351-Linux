@@ -1,0 +1,15 @@
+# 行尾统一为 LF。
+#
+# 这是必须的，不是洁癖：
+#  * patches/*.patch 里嵌的是 Linux shell 脚本与 Python，行尾被转成 CRLF 后
+#    在设备上会出各种怪问题（最典型的是 shebang 行尾多一个 \r，内核直接不认）。
+#  * 补丁文件本身若被转换，git apply 的上下文行就对不上了（这个坑我已经踩过一次）。
+* text=auto eol=lf
+
+# 补丁按二进制处理，Git 绝不碰它的字节
+*.patch -text
+
+# 显式二进制
+*.png binary
+*.jpg binary
+*.ico binary
