@@ -528,7 +528,42 @@ $hookNew = $hookNew.Replace('@@@@', "`t`t").Replace('@@', "`t")
 Patch $hook $hookOld $hookNew '10-mu300-usb: strip the early address from rndis0 too'
 
 Write-Host ""
-Write-Host "=== 12. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 12. leave fw4's software flow offload OFF (or the firewall can never re-render) ==="
+# The fourth member of the same family, and the one that looks least like a firewall problem.
+#
+# The WAN here is a custom netifd proto (mu300cell) whose l3_device (sipa_eth0) only appears once the
+# modem has dialled - well after fw4 rendered its ruleset at boot. fw4 builds a zone's rules from its
+# interfaces' devices, so `accept_to_wan` comes out EMPTY: LAN -> WAN forwarding has no accept rule,
+# and the forward chain falls through to handle_reject, which RSTs every TCP connection. The device's
+# own DNS and traffic keep working, so it presents as "the hotspot has no DNS".
+#
+# OpenWrt already has the repair: /etc/hotplug.d/iface/20-firewall runs `fw4 -q reload` on wan ifup.
+# It silently fails, because flow offloading is on: `flowtable ft` cannot be replaced while flows are
+# in it, so nft aborts the whole transaction with "Resource busy" - and `-q` swallows the message.
+# `fw4 reload`/`/etc/init.d/firewall reload` fail the same way from a shell; only stop+start works.
+#
+# With offloading off there is no flowtable, the reload succeeds, and the existing hotplug heals the
+# zone by itself on every WAN up - including after a flap. Verified on the V50, 2026-10-10: with
+# offloading on, every forwarded TCP connection was RST (curl 000) and accept_to_wan was empty; with
+# it off, the hook logs "Reloading firewall due to ifup of wan ()" and HTTPS returns 200.
+# Cost: no software offload for forwarded flows. SIPA and SC2355 have no hardware offload anyway, and
+# a router whose firewall cannot be reloaded is worse than one without flow offload.
+$flowOld = $T + "uci -q set firewall.@defaults[0].flow_offloading='1'" + "`n" +
+           $T + "uci -q set firewall.@defaults[0].flow_offloading_hw='0'"
+$flowNew = $T + "# Flow offload stays OFF (V50, 2026-10-10)." + "`n" +
+           $T + "# It was on, and it broke forwarding: the WAN's device appears only after the modem" + "`n" +
+           $T + "# dials, so fw4 renders accept_to_wan empty at boot, and the hotplug that would fix it" + "`n" +
+           $T + "# (hotplug.d/iface/20-firewall, which runs 'fw4 -q reload') cannot: replacing the" + "`n" +
+           $T + "# flowtable while flows are in it fails with Resource busy, and -q hides the error." + "`n" +
+           $T + "# Every forwarded TCP was then RST by handle_reject, while the router's own DNS kept" + "`n" +
+           $T + "# working - so it reads as 'the hotspot has no DNS'. See docs/04-WiFi与DHCP根因分析.md." + "`n" +
+           $T + "# SIPA and SC2355 have no hardware offload anyway, so little is lost." + "`n" +
+           $T + "uci -q set firewall.@defaults[0].flow_offloading='0'" + "`n" +
+           $T + "uci -q set firewall.@defaults[0].flow_offloading_hw='0'"
+Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $flowOld $flowNew '90-mu300: keep flow offloading off'
+
+Write-Host ""
+Write-Host "=== 13. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so

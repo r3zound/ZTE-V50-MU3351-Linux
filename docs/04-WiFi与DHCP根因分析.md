@@ -1,14 +1,17 @@
-# V50 WiFi 与 DHCP 根因分析（2026-10-10）
+# V50 WiFi、DHCP 与转发根因分析（2026-10-10）
 
-结论：**三个互相独立的缺陷叠加**，前两个让我连续误判方向，第三个才是 DHCP 拿不到地址的真因。
+结论：**四个互相独立的缺陷**。前两个让我连续误判方向，第三个是 DHCP 拿不到地址的真因，
+第四个表现为「没有 DNS / 上不了网」，但**根本不是 DNS 问题**。
 
 | # | 缺陷 | 表现 | 状态 |
 |---|---|---|---|
 | 1 | `openwrt/overlay/etc/init.d/mu300-hw` 被写成带 UTF-8 BOM | WiFi 驱动从未加载，`wlan0` 根本不存在，热点不广播 | 已修 |
 | 2 | `MU300_USBNET` 补丁改了 `boot_b` 偏移 44 的内核命令行 | `switch.sh` 认不出 Linux 镜像，从 Android 切不进 Linux | 已撤 |
 | 3 | **fw4 渲染出的 lan 区没有任何设备** | 客户端能关联、能发 DISCOVER，但包在进 dnsmasq 前被丢弃 | 已修 |
+| 4 | **`accept_to_wan` 为空 + flow offload 挡住防火墙重载** | 经本机的**转发 TCP 全部被 RST**，但本机 DNS 与 ICMP 正常 → 像「没有 DNS」 | 已修 |
 
 最终状态：`192.168.77.232/24`，网关 `192.168.77.1`，LuCI HTTP 200，经设备 DNS 可解析外网。
+**补齐后**：经 WiFi 与 USB RNDIS 的真实 HTTPS 均返回 200（0.35s / 0.18s）。
 
 ---
 
@@ -184,6 +187,128 @@ chain accept_from_lan {
 注意 `firewall restart` 会失败（`flowtable ft` → `Resource busy`），必须 `stop` 再 `start`。
 
 之后 PC 立刻拿到 `192.168.77.232`。
+
+---
+
+## 缺陷 4：转发 TCP 全被 RST —— 最不像防火墙的防火墙问题
+
+### 症状
+
+用户报「OpenWrt 貌似没有 DNS，不能上网」。实测：
+
+```
+nft list chain inet fw4 accept_to_wan
+table inet fw4 {
+	chain accept_to_wan {
+	}
+}
+```
+
+**空的。** 于是 `forward` 链的走向是：
+
+```
+chain forward { policy drop;
+    iifname "br-lan" jump forward_lan   →  jump accept_to_wan（空，穿过）
+                                        →  jump accept_to_lan（oifname br-lan，不匹配）
+    jump handle_reject                  →  meta l4proto tcp reject with tcp reset
+}
+```
+
+**每一个转发的 TCP 连接都被 RST**。实测（强制源地址，绕开本地代理）：
+
+| 源地址 | 目标 :443 | 结果 |
+|---|---|---|
+| 有线 172.20.4.180（对照） | 百度 | ✅ 40ms |
+| WiFi 192.168.77.232（经本机） | 百度 | ❌ 拒绝/RST |
+| RNDIS 192.168.77.247（经本机） | 百度 | ❌ 拒绝/RST |
+
+而**本机自己**解析域名正常、`ping 223.5.5.5` 正常、能上外网 —— 所以看起来像「DNS 坏了」。
+
+### 成因链（三步，每步都"看起来正常"）
+
+1. **WAN 的 `l3_device` 出现得比 fw4 渲染晚。**
+   `network.wan.proto='mu300cell'` 是本项目自定义的 netifd proto，`l3_device` 要等 modem 拨号成功才是 `sipa_eth0`。
+   而 fw4 是从**接口的设备**推导 zone 规则的，开机那次渲染时 wan 区解析不到设备 → `accept_to_wan` 生成为空。
+
+2. **OpenWrt 本来有修复机制，但它恰好失效。**
+   `/etc/hotplug.d/iface/20-firewall` 会在 wan ifup 时执行 `fw4 -q reload`：
+
+   ```sh
+   [ "$ACTION" = ifup -o "$ACTION" = ifupdate ] || exit 0
+   has_zone || exit 0
+   logger -t firewall "Reloading firewall due to $ACTION of $INTERFACE ($DEVICE)"
+   fw4 -q reload
+   ```
+
+3. **`fw4 -q reload` 静默失败，因为 flow offload 开着。**
+   `flow_offloading='1'` 会建一个 `flowtable ft`；表里有活跃流时无法重建，nft 直接中止整个事务：
+
+   ```
+   /dev/stdin:10:12-13: Error: Could not process rule: Resource busy
+   	flowtable ft {
+   ```
+
+   而 **`-q` 把这个错误吞掉了** —— 日志里连一行都没有。从 shell 手动跑 `fw4 reload` 或
+   `/etc/init.d/firewall reload` 也是同样失败，**只有 `stop` + `start` 能成功**。
+
+结果：`accept_to_wan` 永远是空的，而且**永远不会自愈**。
+
+### 修法
+
+把 flow offload 关掉即可 —— 没有 flowtable，`fw4 -q reload` 就能成功，于是第 2 步那个
+**已有的**热插拔钩子会在每次 WAN 起来时自动修好：
+
+```sh
+uci -q set firewall.@defaults[0].flow_offloading='0'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+uci commit firewall
+/etc/init.d/firewall stop; sleep 2; /etc/init.d/firewall start
+```
+
+**不需要新增任何脚本** —— 这是这个 bug 最值得记的一点：修复机制一直都在，只是被 offload 挡住了。
+
+实测验证（关闭 offload 后，手动触发 wan 的 ifup 钩子）：
+
+```
+logread → user.notice firewall: Reloading firewall due to ifup of wan ()
+nft list chain inet fw4 accept_to_wan
+	oifname "sipa_eth0" ct state invalid counter packets 0 bytes 0 drop comment "!fw4: Prevent NAT leakage"
+	oifname "sipa_eth0" counter packets 6 bytes 1092 accept comment "!fw4: accept wan IPv4/IPv6 traffic"
+```
+
+之后真实 HTTPS 经 WiFi 与 RNDIS 均返回 **200**。
+
+补丁脚本第 12 步把 `90-mu300` 里的 `flow_offloading` 从 `'1'` 改成 `'0'` 并写明原因，
+否则**新装的设备会重新打开 offload，再踩一遍**。
+
+代价：转发的 TCP/UDP 不再走软件快速转发。但 SIPA 与 SC2355 本来就没有硬件 offload，
+而「防火墙再也无法重载」比「没有 flow offload」严重得多。
+
+### 为什么容易被误判成 DNS
+
+- 设备自己的 DNS（`nslookup ... 127.0.0.1`）正常 → 以为 DNS 没问题
+- 设备自己 `ping 223.5.5.5` 正常 → 以为出口没问题
+- 客户端**能拿到 IP**、能 ping 通网关 → 以为链路没问题
+- 真正坏的只有「**转发**」这一层，而 `accept_to_wan` 是**渲染后**的结果 ——
+  只看 `/etc/config/firewall` 会看到 `masq='1'`、`network='wan'`，一切正常
+
+**判据**：客户端用本机做 DNS 能解析、但访问任何网站都失败时，直接看这个：
+
+```sh
+nft list chain inet fw4 accept_to_wan     # 空 = 命中此问题
+ip route | grep -c 192.168.77             # 1 = 路由正常（排除缺陷 3/5）
+```
+
+---
+
+## 缺陷 5：rndis0 加入网桥后仍持有 LAN 地址（重复路由）
+
+见下节「我自己写的 mu300-lancheck 有两个 bug」之后的内容 —— 简言之：
+`10-mu300-usb` 的地址清理循环只处理「已经是 br-lan 端口」的网卡，
+而 `rndis0` 是在**之后**才加入网桥的，于是它同时持有 `192.168.77.1/24`，
+产生两条相同的 `192.168.77.0/24` 路由，回包走 USB → WiFi 客户端连 ping 都不通。
+修法是在把 `rndis0` 加入网桥**之后**再跑一次同样的地址清理（补丁脚本第 11 步），已实测：
+人为造出故障 → 触发 `ifup lan` → 地址被自动清掉、路由只剩一条。
 
 ---
 
