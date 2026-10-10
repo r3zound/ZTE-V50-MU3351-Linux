@@ -21,7 +21,7 @@
 |---|---|
 | **WiFi 热点可连且能拿 IP** | 广播热点，客户端自动获得 `192.168.77.100-249` 段地址，能上网 |
 | **USB 网络可选** | 切成 RNDIS 后 PC 出现网卡并拿到 LAN 地址，USB 也能上网 |
-| 实测吞吐 | USB RNDIS 上行约 **398 Mbps** / 下行约 **308 Mbps**；WiFi 约 **135 / 236 Mbps**（本地链路，不经 4G）。测法见 `docs/06-OpenWrt操作手册.md` 附录 |
+| 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。**8 流并发经 RNDIS 聚合达 681 Mbps**（USB 2.0 理论上限仅 426 Mbps → 链路确为 USB 3.0）。测法见 `docs/06-OpenWrt操作手册.md` 附录 |
 | 管理 | `ssh root@192.168.77.1`；LuCI `http://192.168.77.1/cgi-bin/luci/` |
 | 一键切换 | 在 Android 侧一条命令进 OpenWrt；在 OpenWrt 里重启即回 Android |
 | 救砖通道 | USB 串口 COM12（115200）直接给 root shell，不怕网络配坏 |
