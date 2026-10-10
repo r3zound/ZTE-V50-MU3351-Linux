@@ -364,5 +364,78 @@ uci set → uci commit → 重启对应服务
 ## 10. 未验证 / 待办
 
 - **BROM 短接 + WPFlasher 刷回**：本文未复测，流程见 `V50\一键刷分区、备份还原工具\` 与 `V50\短接触点.png`；备份在 `backup\2026-10-09-pre-install\`（28 分区 597 MiB，含 `misc.img`）
-- **RNDIS 长期稳定性**：只验证过单次开机，且与 WiFi 冲突，不推荐日常使用
-- **设备上仍有旧版文件**：`/etc/uci-defaults/90-mu300`、`/opt/mu300/bin/mu300-lancheck`、`/etc/firewall.user` 尚未更新到仓库版本（防火墙改动已通过 UCI 持久化，功能不受影响）。下次整机 `update` 会带上
+- **设备上仍有旧版文件**：`/opt/mu300/bin/mu300-lancheck` 尚未更新到仓库版本。下次整机 `update` 会带上
+
+---
+
+## 附：实测网络吞吐（USB RNDIS vs WiFi）
+
+2026-10-10 实测。**测的是 PC ↔ 设备之间的本地链路，不经过 4G**，所以既不消耗流量，也不会被运营商带宽掩盖。
+
+### 结果
+
+| 方向 | USB RNDIS（`192.168.77.247`） | WiFi（`192.168.77.232`） | 倍数 |
+|---|---|---|---|
+| **下行**（设备 → PC） | **308 / 309 / 304 Mbps**（约 308） | 239 / 230 / 237 Mbps（约 236） | 1.3× |
+| **上行**（PC → 设备） | **405 / 382 / 408 Mbps**（约 398） | 160 / 126 / 119 Mbps（约 135） | **2.9×** |
+
+每轮 256 MB，各 3 轮，数值稳定。
+
+### 参照：链路标称速率
+
+| 项 | 值 | 来源 |
+|---|---|---|
+| USB 链路实际协商 | **`super-speed`**（USB 3.0 = 5 Gbps） | `/sys/class/udc/25100000.dwc3/current_speed` |
+| USB 控制器上限 | `super-speed-plus`（10 Gbps） | 同目录 `maximum_speed` |
+| PC 侧网卡自报 | `LinkSpeed: 3.8 Gbps` | Windows `Get-NetAdapter`（按 USB 描述符推算） |
+
+**实测 ~300–400 Mbps 相对 5 Gbps 标称只有约 6–8%**，这是 RNDIS 的常态，不是故障：
+RNDIS 把每个以太帧当作一次 USB 传输来封装（协议开销比 NCM 大），加上这类嵌入式平台
+在单条 TCP 流上的处理开销，都会把上限压到这里。要更高只能用 NCM（Windows 10 2004+ 免驱）
+或者多流并发。
+
+### 怎么复现
+
+设备端（注意 **`/usr/bin/nc` 是系统 busybox，不支持监听模式**，必须用项目自带那个）：
+
+```sh
+# 上行测试的接收端；循环监听，否则 busybox nc 只接一次就退出
+while true; do /opt/mu300/bin/busybox nc -l -p 5001 > /dev/null; done
+```
+
+下行测试：放一个大文件到 uhttpd 的 `/www` 下，然后从 PC 拉取。
+
+PC 端（**必须绕开本机代理**，否则测的是代理；并用 `--interface` 强制走目标链路）：
+
+```powershell
+$c = "$env:SystemRoot\System32\curl.exe"
+# 下行：curl 直接给出 speed_download
+& $c -s -o NUL --noproxy '*' --interface 192.168.77.247 `
+   -w '%{size_download} B  %{time_total}s  %{speed_download} B/s' `
+   http://192.168.77.1/speedtest.bin
+```
+
+```powershell
+# 上行：裸 TCP 灌数据（.NET，先 Bind 源地址再 Connect）
+$buf = New-Object byte[] (256*1024)
+$sock = New-Object Net.Sockets.Socket('InterNetwork','Stream','Tcp'); $sock.NoDelay = $true
+$sock.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Parse('192.168.77.247'),0)))
+$sock.Connect('192.168.77.1', 5001)
+$ns = New-Object Net.Sockets.NetworkStream($sock, $true)
+$total = 256MB; $sent = 0; $t0 = Get-Date
+while ($sent -lt $total) { $ns.Write($buf,0,$buf.Length); $sent += $buf.Length }
+"$([math]::Round($sent*8/1e6/((Get-Date)-$t0).TotalSeconds,1)) Mbps"
+```
+
+### 两个容易踩的点
+
+1. **本机代理**：这台 PC 上 `http_proxy`/`https_proxy` 指向 `127.0.0.1:7897`（mihomo）。
+   不加 `--noproxy '*'` 的话，测到的是代理回环，不是 V50 这条路 —— 我第一次就被骗过，
+   误以为"IPv4 全通"。
+2. **`/usr/bin/nc` 不能监听**：它是系统 busybox 的，用法只有 `nc [IPADDR PORT]`。
+   带 `-l -p` 的是 `/opt/mu300/bin/busybox`（项目自带的 Ubuntu 版本）。
+
+### 结论
+
+**USB RNDIS 是这台设备上更快的通道**，尤其上行（~3× WiFi）；但按第 4 节，它与 WiFi
+同时启用会产生重复路由导致 WiFi 不通，**日常仍建议只留 WiFi**，需要大流量传输时再切 USB。
