@@ -128,7 +128,8 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 11 | **`rndis0` 加入网桥后再清一次地址** | 用 RNDIS 时产生重复路由，WiFi 连 ping 都不通 |
 | 12 | **关掉 flow offload**（`accept_to_wan` 为空 + `fw4 reload` 被 `Resource busy` 挡住） | **转发的 TCP 全被 RST**：客户端能解析域名却打不开任何网页，像「没有 DNS」 |
 | 13 | **修正 `board.json` 里的 `eth0`**（改成实际的 `br-lan`） | LuCI 端口状态永远显示一个**不存在的 `eth0` 未连接**（armsr 基础镜像的残留） |
-| 14 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
+| 14 | **状态看板的 USB 指示器按实际网卡名取数**（`usb0` 或 `rndis0`） | 看板的「USB 网络」永远显示**未连接**，哪怕链路正通（RNDIS 模式下网卡叫 `rndis0`） |
+| 15 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
 
 ### 4.1 为什么第 6/7 步是必需的
 
@@ -332,6 +333,8 @@ probe/
 | 能关联热点，但拿不到 IP / ping 不通 | fw4 的 lan 区是空的 | 5.1 |
 | **能解析域名、能 ping 通网关，但打不开任何网页** | `accept_to_wan` 为空 + flow offload 挡住了 `fw4 reload` | 第 4 节第 12 步（`nft list chain inet fw4 accept_to_wan` 为空即命中） |
 | **LuCI 端口状态显示一个不存在的 `eth0`「未连接」** | armsr 基础镜像的 `board.json` 把 LAN 设备写成 `eth0` | 第 4 节第 13 步 |
+| **状态看板的「USB 网络」显示未连接，但链路是通的** | 后端写死读 `usb0`，RNDIS 模式下网卡叫 `rndis0` | 第 4 节第 14 步 |
+| **状态看板的「邻区」表全空** | **不是 bug**：调制解调器返回 0 个邻区（服务小区数据正常） | 见 `docs/04-WiFi与DHCP根因分析.md` 附录 |
 | 热点根本不广播，但 SSH 正常 | `mu300-hw` 编码坏了（BOM/UTF-16） | 5.2 |
 | WiFi 连 ping 都不通，USB 口却正常 | 两条重复路由 | 5.3 |
 | 切不进 Linux，报「not Linux」 | boot 镜像命令行被改过 | 第 4 节补丁第 2/2b 步 |

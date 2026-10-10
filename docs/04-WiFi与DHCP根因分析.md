@@ -415,6 +415,92 @@ luci getBuiltinEthernetPorts → [{"role":"lan","device":"br-lan"}]   （up、ca
 
 ---
 
+## 附：状态看板把「USB 网络」显示成「未连接」
+
+**症状**：`http://192.168.77.1/cgi-bin/luci/admin/home` 的状态看板里，**USB 网络显示「未连接」**，
+而 USB 链路明明是通的（PC 正通过它收发数据）。
+
+**真因**：又是同一个根因家族 —— **代码写死 `usb0`，而 RNDIS 模式下 gadget 网卡叫 `rndis0`**。
+
+前端那行（`view/mu300/home.js`）：
+
+```js
+M.set('wusb', (i.net && i.net.usb0 && i.net.usb0.up) ? _('Connected') : _('Disconnected'));
+```
+
+后端 `/usr/libexec/unisoc-modem/dashboard-info`：
+
+```sh
+USB_DEVICE=$(safe_iface "$(cfg usb_device)" usb0)     # ← 回落值是字面量 usb0
+...
+printf '"net":{...,"usb0":%s},' ... "$(net_obj "$USB_DEVICE")"
+```
+
+`net_obj` 在设备不存在时返回 `null`：
+
+```sh
+net_obj() { local d=/sys/class/net/$1; [ -d "$d" ] || { echo null; return; } ... }
+```
+
+而 `usb_device` 在 mu300 的 UCI 配置里**从未设置**，于是永远取字面量 `usb0`：
+
+```
+$ ls /sys/class/net/     →  ... rndis0 ...            （没有 usb0）
+$ ls /sys/class/net/br-lan/brif →  rndis0  wlan0
+$ uci show mu300 | grep usb_device →  （空）
+```
+
+→ `net.usb0` 恒为 `null` → 看板永远显示「未连接」。
+
+**修法**（补丁脚本第 14 步）：设备名按实际存在的那个来，JSON 键仍是 `usb0`（前端读的是这个键）。
+
+```sh
+if [ ! -d "/sys/class/net/$USB_DEVICE" ]; then
+	for _c in usb0 rndis0; do
+		[ -d "/sys/class/net/$_c" ] && { USB_DEVICE=$_c; break; }
+	done
+fi
+```
+
+实测：修前 `"usb0":null` → 修后 `"usb0":{"rx":5914580530,"tx":6766551764,"up":1}`。
+
+> 该文件不在 `openwrt/overlay/` 下（它属于 `openwrt/luci-app-mu300/root/`），
+> 所以补丁脚本的镜像步骤给它加了 `目标路径=源路径` 的写法，才能进 vendor-extra 通道送到设备。
+
+---
+
+## 附：邻区表全部为空 —— 这个不是 bug
+
+**症状**：状态看板的「邻区」表格「制式/频段/PCI/频点/RSRP/RSRQ/SINR」**全部为空**，
+显示「暂无邻区数据」。
+
+**结论：看板是如实反映，调制解调器就是返回 0 个邻区。** 手工执行脚本用的那两条 AT 指令验证：
+
+| AT 指令 | 用途 | 实测返回 |
+|---|---|---|
+| `AT+SPQ5GNCELLEX` | NR 邻区表 | `427010,308,-7457,-575,2095,0,0,0,0,` |
+| `AT+SPENGMD=0,6,6` | LTE 邻区槽位 | `0,0,0,...` ×8 组 |
+| `AT+SPENGMD=0,14,1` | NR **服务**小区 | 完整数据（band1 / ARFCN 427010 / PCI 308 / RSRP −74.8 / SINR 21.2） |
+
+`AT+SPQ5GNCELLEX` 的第 9 个字段就是**邻区数量**，这里是 **`0`**；解码函数也读这个字段：
+
+```awk
+BEGIN { m = split(line, a, ","); cnt = a[9]+0; ... for (i = 0; i < cnt ...) }
+```
+
+`cnt=0` → 解出空列表 → `"neigh":null` → 看板显示「暂无邻区数据」。
+
+**判据**：**服务小区数据正常、只有邻区为空** → 不是看板问题。
+若连服务小区也空，那才要去查 `MODE=full` 与注册状态（脚本用 `REGISTERED` 门槛跳过无服务时的
+AT 连锁超时）。
+
+**为什么调制解调器不给邻区**（未进一步定论，属固件/网络侧行为）：两条查询都在已注册状态下执行，
+但都返回空。`AT+SPENGMD=0,6,6` 要求 LTE 有服务小区（当前是 NR SA），所以为全 0 属正常；
+NR 邻区为 0 则更像该模块在当前网络/模式下不做邻区上报。
+**注意**：脚本注释里明确警告 `AT+SPENGMD=0,1,0` 会把 AT 口切到流模式，**不要乱试**未文档化的工程模式命令。
+
+---
+
 ## 还没做的
 
 - 设备上 `/etc/uci-defaults/90-mu300` 和 `opt/mu300/bin/mu300-lancheck` 还是旧版本。

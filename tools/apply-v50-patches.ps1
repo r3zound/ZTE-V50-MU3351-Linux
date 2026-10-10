@@ -387,11 +387,16 @@ $mirror = @(
     'etc\init.d\mu300-post',
     'etc\hotplug.d\iface\10-mu300-usb',
     'etc\uci-defaults\90-mu300',
-    'opt\mu300\bin\mu300-lancheck'
+    'opt\mu300\bin\mu300-lancheck',
+    # "dest=source" when the file does not live under openwrt/overlay/: the dashboard backend is a
+    # package file (openwrt/luci-app-mu300/root/), so it is named explicitly here.
+    'usr\libexec\unisoc-modem\dashboard-info=openwrt\luci-app-mu300\root\usr\libexec\unisoc-modem\dashboard-info'
 )
 $dst = "$Repo\openwrt\vendor-extra"
-foreach ($rel in $mirror) {
-    $src = "$Repo\openwrt\overlay\$rel"
+foreach ($entry in $mirror) {
+    $parts = $entry -split '=', 2
+    $rel = $parts[0]
+    $src = if ($parts.Count -eq 2) { "$Repo\$($parts[1])" } else { "$Repo\openwrt\overlay\$rel" }
     $out = Join-Path $dst $rel
     if (-not (Test-Path $src)) { Write-Host "  SKIP (missing): $rel"; continue }
     New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
@@ -594,7 +599,40 @@ $boardNew = $boardNew.TrimEnd("`n")
 Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $boardOld $boardNew '90-mu300: board.json names the real LAN device'
 
 Write-Host ""
-Write-Host "=== 14. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 14. the dashboard's USB indicator must find the gadget, whatever it is called ==="
+# The status dashboard (admin/home) shows a USB network indicator by reading status.net.usb0.up:
+#
+#   M.set('wusb', (i.net && i.net.usb0 && i.net.usb0.up) ? _('Connected') : _('Disconnected'));
+#
+# and dashboard-info fills that field from net_obj on a device name it picks like this:
+#
+#   USB_DEVICE=$(safe_iface "$(cfg usb_device)" usb0)
+#
+# With no uci setting that is the literal "usb0" - but the gadget netdev is usb0 only in NCM/ECM
+# mode. In RNDIS mode boot/init builds rndis0 (and rndis0 is what joins br-lan), so net_obj found no
+# such device, returned null, and the dashboard reported the USB network as "Disconnected" for ever
+# while the link was up and carrying traffic. Same root cause as the lan-zone and rndis0-address
+# bugs: code that names usb0 where the gadget may be rndis0.
+#
+# The JSON key stays "usb0" - that is what the page reads - only the device it is measured from
+# becomes whichever gadget netdev exists.
+$dashFile = "$Repo\openwrt\luci-app-mu300\root\usr\libexec\unisoc-modem\dashboard-info"
+$dashOld = 'USB_DEVICE=$(safe_iface "$(cfg usb_device)" usb0)'
+$dashNew = $dashOld + "`n" + (@'
+# The gadget netdev is usb0 in NCM/ECM mode and rndis0 in RNDIS mode (see boot/init
+# setup_usb_gadget). Neither the uci option nor the fallback above names that, so with RNDIS
+# selected this read a device that does not exist, net_obj returned null, and the status
+# dashboard reported the USB network as "Disconnected" while the link was up. (V50, 2026-10-10)
+if [ ! -d "/sys/class/net/$USB_DEVICE" ]; then
+	for _c in usb0 rndis0; do
+		[ -d "/sys/class/net/$_c" ] && { USB_DEVICE=$_c; break; }
+	done
+fi
+'@).TrimEnd("`n") -replace "`r`n", "`n"
+Patch $dashFile $dashOld $dashNew 'dashboard-info: find the USB gadget netdev by name, not by usb0'
+
+Write-Host ""
+Write-Host "=== 15. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so
