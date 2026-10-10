@@ -129,7 +129,8 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 12 | **关掉 flow offload**（`accept_to_wan` 为空 + `fw4 reload` 被 `Resource busy` 挡住） | **转发的 TCP 全被 RST**：客户端能解析域名却打不开任何网页，像「没有 DNS」 |
 | 13 | **修正 `board.json` 里的 `eth0`**（改成实际的 `br-lan`） | LuCI 端口状态永远显示一个**不存在的 `eth0` 未连接**（armsr 基础镜像的残留） |
 | 14 | **状态看板的 USB 指示器按实际网卡名取数**（`usb0` 或 `rndis0`） | 看板的「USB 网络」永远显示**未连接**，哪怕链路正通（RNDIS 模式下网卡叫 `rndis0`） |
-| 15 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
+| 15 | **主机名改成 `V50`**（纯展示层） | shell 提示符与页面标题仍写着上一台设备的 `mu300` |
+| 16 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
 
 ### 4.1 为什么第 6/7 步是必需的
 
@@ -345,7 +346,46 @@ probe/
 
 ---
 
-## 11. 致谢与许可
+## 11. 命名约定与设备身份 —— 为什么内部仍叫 mu300
+
+**V50（`MU3351`）与 F50（`MU300`）是同一块板**：`ro.hardware` 都是 `ums9620_2h10_feimao`，
+SoC 同为 UMS9620 / T760，内核基线同为 5.4.254。所以上游对 F50 的支持**直接适用**，
+`DEVICE=f50` 是**正确且经过实测**的路径 —— 补丁第 1 步只是让机型识别认下 `V50` / `MU3351`。
+
+**内部标识一律沿用上游的 `mu300` 命名，这是有意的，不是遗漏。** 这些名字不是标签，而是已经
+落地的关联契约，有些还是唯一的恢复通道：
+
+| 标识 | 规模（本 fork 内） | 为什么不动 |
+|---|---|---|
+| `/opt/mu300`、`/etc/mu300` | 139 + 85 文件 | Android 侧安装器与 Linux 侧**跨系统**引用的绝对路径，boot initramfs 里也有 |
+| `mu300-*` 命令（46 个脚本） | 292 文件 / 4162 处 | `/etc/init.d`、`inittab`、hotplug、cron 全按名字调用 |
+| `MU300_*` 配置键 | 185 文件 / 2613 处 | 上游对外约定（`MU300_DEVICE`、`MU300_BOOT_OS` …） |
+| `mu300cell` netifd proto | 21 文件 | UCI 里写着 `network.wan.proto='mu300cell'`：改了已有设备配置失效，且要同时改 `mu300cell.sh` / `mu300cell-v6.sh` / LuCI 的 `protocol/mu300cell.js` —— **漏一个 WAN 直接起不来** |
+| `mu300dash` ubus 对象 | 34 文件 | LuCI 前端与 rpcd 后端必须同时改，漏一处整页空白 |
+| **`mu300root` ext4 卷标** | 37 文件 | **`android-mount-mu300root.sh` 会校验这个卷标才挂载** —— 那是从 Android 挂载 Linux 分区修文件、Linux 网络全坏时唯一的手段。改了等于**自断退路** |
+| Magisk 模块 `mu300_linux_switch` | 15 文件 | 模块 id 一变，Magisk 面板、`su -c mu300-linux`、开机钩子全要跟着 |
+
+另外两条现实理由：
+
+- **升级路径会裂开**：项目支持 `update` 安装（保留 `/etc/config`），改名后已有设备的配置全部指向旧名字 → 半坏状态。
+- **与上游永久分叉**：上游每次发版都用旧名字加新代码，改名后每个 release 都要重新套一遍 rename 层，而**新文件必然漏改** —— 本项目里「漏改」的典型表现是**静默失效**（BOM 让 WiFi 不加载、`usb0`/`rndis0` 不匹配、`accept_to_wan` 为空），不是报错。
+
+### 只改「给人看的名字」
+
+目前**只有主机名**：刷完后是 **`V50`**（shell 提示符 `root@V50:~#`、页面标题都会跟着变）。
+一条命令可回退：
+
+```sh
+uci set system.@system[0].hostname='mu300'; uci commit system; /etc/init.d/system reload
+```
+
+**刻意没改**：`view/mu300/device.js` 里两条用户可见的告警（"F50 has no battery …"）。
+改英文 msgid 会让 `zh-cn` / `tr` 编译目录（`.lmo`）里的对应译文失配，在本来全中文的页面上
+混出英文 —— 比现状更差；而且那句话对 V50 同样成立（同样没有电池）。
+
+---
+
+## 12. 致谢与许可
 
 - **[dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)** —— 上游项目，**MIT**。
   本仓库全部内容是对它的适配补丁与实测记录。

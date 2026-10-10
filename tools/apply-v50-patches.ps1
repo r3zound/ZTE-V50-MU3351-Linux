@@ -632,7 +632,41 @@ fi
 Patch $dashFile $dashOld $dashNew 'dashboard-info: find the USB gadget netdev by name, not by usb0'
 
 Write-Host ""
-Write-Host "=== 15. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 15. display name only: the hostname says V50, nothing functional moves ==="
+# LAYER 3 of the V50 identity work, and deliberately the ONLY thing renamed anywhere.
+#
+# The question this settles: should the whole project be re-badged from MU300/F50 to V50/MU3351?
+# No. The names inside are not labels, they are the ABI and the recovery path:
+#   * /opt/mu300, /etc/mu300        - absolute paths the Android-side installer also uses
+#   * mu300-* commands (46 scripts) - called by name from /etc/init.d, inittab, hotplug, cron
+#   * MU300_* keys                  - the upstream's own settings contract
+#   * mu300cell netifd proto        - in UCI as network.wan.proto, so renaming it breaks an
+#                                     already-installed device's config; miss one of the three
+#                                     files and the WAN never comes up
+#   * mu300dash ubus object         - LuCI front end and rpcd back end must change together
+#   * the mu300root ext4 label      - android-mount-mu300root.sh VALIDATES this label before it
+#                                     mounts, and that script is the only way to repair the Linux
+#                                     partition from Android. Rename it and the last-resort
+#                                     recovery path refuses to work.
+# On top of that, V50 is the same board as the F50 (ums9620_2h10_feima), so DEVICE=f50 is the
+# correct and tested path - layer 1. Renaming buys no function and guarantees permanent drift from
+# upstream. See the project README, "Naming and device identity".
+#
+# What IS worth renaming is what a person reads. The hostname is the whole of it: it shows up in
+# the shell prompt and the page title. It has no functional dependents (mu300-toolkit reads it only
+# to display it, and offers to change it), and OpenWrt's own uci call sets it, so this is one value
+# with a one-line rollback:  uci set system.@system[0].hostname='mu300'; uci commit system
+#
+# The 2 user-visible "F50 has no battery" strings in view/mu300/device.js are NOT touched: changing
+# an English msgid orphans its zh-cn/tr entry in the compiled .lmo catalogs, which would put mixed
+# languages on a page that is otherwise fully translated. That is worse than the status quo, and the
+# statement itself is true of the V50 as well.
+$hostOld = "set system.@system[0].hostname='mu300'"
+$hostNew = "set system.@system[0].hostname='V50'"
+Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $hostOld $hostNew '90-mu300: hostname V50 (display only)'
+
+Write-Host ""
+Write-Host "=== 16. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so

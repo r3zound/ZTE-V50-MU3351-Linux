@@ -274,9 +274,18 @@ index 5624030..9f60a82 100755
  	procd_close_instance
  }
 diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
-index 2aab62b..9dcb5a6 100755
+index 2aab62b..b284eae 100755
 --- a/openwrt/overlay/etc/uci-defaults/90-mu300
 +++ b/openwrt/overlay/etc/uci-defaults/90-mu300
+@@ -36,7 +36,7 @@ if [ "$run" = first ]; then
+ 	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
+ 	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
+ 	uci -q batch <<UCI
+-set system.@system[0].hostname='mu300'
++set system.@system[0].hostname='V50'
+ set system.@system[0].zonename='Europe/Istanbul'
+ set system.@system[0].timezone='<+03>-3'
+ set network.lan.ipaddr='$lan_ip'
 @@ -59,7 +59,15 @@ if [ "$run" != done ]; then
  	# Forwarded TCP/UDP through the kernel's software flowtable (fw4 puts sipa_eth0 in it: patches/fw4-sipa-offload.patch).
  	# The Unisoc SIPA and SC2355 drivers have no nftables hardware flow offload. (mu300-ttl turns it off while a TTL
@@ -620,7 +629,7 @@ index 0000000..9f60a82
 +}
 diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
 new file mode 100644
-index 0000000..9dcb5a6
+index 0000000..b284eae
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
 @@ -0,0 +1,172 @@
@@ -662,7 +671,7 @@ index 0000000..9dcb5a6
 +	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
 +	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
 +	uci -q batch <<UCI
-+set system.@system[0].hostname='mu300'
++set system.@system[0].hostname='V50'
 +set system.@system[0].zonename='Europe/Istanbul'
 +set system.@system[0].timezone='<+03>-3'
 +set network.lan.ipaddr='$lan_ip'
