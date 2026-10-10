@@ -356,19 +356,29 @@ index 5624030..9f60a82 100755
  	procd_close_instance
  }
 diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
-index 2aab62b..b284eae 100755
+index 2aab62b..701df80 100755
 --- a/openwrt/overlay/etc/uci-defaults/90-mu300
 +++ b/openwrt/overlay/etc/uci-defaults/90-mu300
-@@ -36,7 +36,7 @@ if [ "$run" = first ]; then
+@@ -36,9 +36,15 @@ if [ "$run" = first ]; then
  	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
  	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
  	uci -q batch <<UCI
 -set system.@system[0].hostname='mu300'
-+set system.@system[0].hostname='V50'
- set system.@system[0].zonename='Europe/Istanbul'
- set system.@system[0].timezone='<+03>-3'
+-set system.@system[0].zonename='Europe/Istanbul'
+-set system.@system[0].timezone='<+03>-3'
++set system.@system[0].hostname='ZTE-V50'
++set system.@system[0].zonename='Asia/Shanghai'
++set system.@system[0].timezone='CST-8'
++# The regulatory domain decides which channels may radiate at all (see the note above step 16):
++# with none set, cfg80211 stays on the world domain, every 5 GHz channel is NO-IR, and hostapd refuses
++# to start the AP - the device boots with no hotspot and says nothing. US allows the most power of the
++# countries measured here on 2.4 GHz (30 dBm; BO and CN allow 20) and permits an AP on the low 5 GHz
++# channels too.  Change it with:  uci set wireless.radio0.country='DE'; uci commit wireless; wifi reload
++set wireless.radio0.country='US'
  set network.lan.ipaddr='$lan_ip'
-@@ -59,7 +59,15 @@ if [ "$run" != done ]; then
+ set network.lan.netmask='255.255.255.0'
+ set network.lan.ip6assign='64'
+@@ -59,7 +65,15 @@ if [ "$run" != done ]; then
  	# Forwarded TCP/UDP through the kernel's software flowtable (fw4 puts sipa_eth0 in it: patches/fw4-sipa-offload.patch).
  	# The Unisoc SIPA and SC2355 drivers have no nftables hardware flow offload. (mu300-ttl turns it off while a TTL
  	# is set.)
@@ -385,7 +395,7 @@ index 2aab62b..b284eae 100755
  	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
  fi
  
-@@ -70,6 +78,15 @@ set network.wan.proto='mu300cell'
+@@ -70,6 +84,15 @@ set network.wan.proto='mu300cell'
  UCI
  # the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)
  [ -z "$dev" ] || uci set network.$dev.bridge_empty='1'
@@ -401,7 +411,7 @@ index 2aab62b..b284eae 100755
  # K25 (ported from the kanoqwq fork, cd4fb28): the USB host keeps the address it had from the early server, and
  # dnsmasq broadcasts its OFFER/ACK: Windows can keep asking for the early lease after it has already removed that
  # address, and a unicast reply to the removed address is lost in the NCM host stack. The address is the one preinit's
-@@ -99,6 +116,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
+@@ -99,6 +122,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
  	uci set firewall.$early.output='ACCEPT'
  	uci set firewall.$early.forward='REJECT'
  fi
@@ -424,10 +434,10 @@ index 2aab62b..b284eae 100755
  # that still says "auto" (or nothing) gets English too: auto was nobody's choice there (luci-base's default, and
 diff --git a/openwrt/overlay/opt/mu300/bin/mu300-lancheck b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
 new file mode 100644
-index 0000000..9cf7134
+index 0000000..ea2cc58
 --- /dev/null
 +++ b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,99 @@
 +#!/bin/sh
 +# Report - and if needed repair - the LAN path a client depends on, once per boot.
 +#
@@ -457,13 +467,53 @@ index 0000000..9cf7134
 +    i=$((i + 1))
 +done
 +
-+# The hotspot must be a port of the LAN bridge; a client that is not attached to it can associate with the
-+# AP and still reach nothing. If it is missing, start Wi-Fi again so netifd attaches it.
-+if [ -d /sys/class/net/wlan0 ] && [ ! -e /sys/class/net/br-lan/brif/wlan0 ]; then
-+    say "wlan0 is not a port of br-lan: starting Wi-Fi again so netifd attaches it"
++# The hotspot has to exist, be a port of the LAN bridge, AND be carrying traffic. All three are needed,
++# and the last two are why this was rewritten (V50, mainline kernel 6.18, 2026-10-10):
++#
++#   * wlan0 sat in the bridge with NO CARRIER and hostapd already given up. The original test asked only
++#     "is wlan0 missing from brif", so it never fired and the device booted with no hotspot, no DHCP
++#     server (udp67=0) and nothing on the device looking wrong.
++#   * on the mainline kernel the FIRST bring-up always fails and a retry always succeeds:
++#         at boot           hostapd: UNINITIALIZED->COUNTRY_UPDATE->DISABLED->AP-DISABLED
++#         wifi down; wifi up  hostapd: COUNTRY_UPDATE->HT_SCAN->ENABLED->AP-ENABLED
++#     `wifi up` alone does not clear it - the interface has to go down first - so every attempt does both.
++#   * and when this runs the interface may not exist yet at all: br-lan gets its address from the lan
++#     interface, which comes up before the wireless one. Guarding the whole block with `[ -d .../wlan0 ]`
++#     (the first version of this fix did) skipped the repair in exactly the case it was written for, and
++#     the log looked like a pass. Wait for wlan0 first, then repair.
++# The regulatory database FIRST, and before the Wi-Fi is restarted below so hostapd picks the country
++# up. cfg80211 asks for regulatory.db long before the rootfs is mounted and that first load always
++# fails ("cfg80211: failed to load regulatory.db"); without it cfg80211 is stuck on the world domain,
++# where EVERY 5 GHz channel is NO-IR, and hostapd refuses to start an AP:
++#
++#     Frequency 5180 (primary) not allowed for AP mode, flags: 0x40853 NO-IR
++#     Could not select hw_mode and channel. (-3)   ->   AP-DISABLED
++#
++# Verified on the device: after this runs, `iw reg set US` reports "country US: DFS-FCC" and the same
++# AP starts on channel 36; before it, `iw reg set` does nothing and the channel is refused. opt/mu300/bin/
++# regdb-load feeds the database through /sys/class/firmware for the pending request and reloads; running
++# it here, after netifd, is what makes the country in 90-mu300 mean anything. (V50, mainline 6.18,
++# 2026-10-10)
++/opt/mu300/bin/regdb-load >/dev/null 2>&1
++
++_wi=0
++while [ $_wi -lt 12 ] && [ ! -d /sys/class/net/wlan0 ]; do
++    sleep 5
++    _wi=$((_wi + 1))
++done
++_repair=0
++while [ $_repair -lt 3 ]; do
++    _st=$(cat /sys/class/net/wlan0/operstate 2>/dev/null)
++    _port=$(ls /sys/class/net/br-lan/brif 2>/dev/null | grep -c '^wlan0$')
++    _has=$( [ -d /sys/class/net/wlan0 ] && echo yes || echo no )
++    [ "$_has" = yes ] && [ "$_st" = up ] && [ "$_port" = 1 ] && break
++    _repair=$((_repair + 1))
++    say "wlan0 not serving (exists=$_has operstate=$_st bridge-port=$_port): wifi down; wifi up (attempt $_repair)"
++    wifi down 2>/dev/null
++    sleep 3
 +    wifi up 2>/dev/null
 +    sleep 20
-+fi
++done
 +
 +br=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\/[0-9]*\).*/\1/p' | tr '\n' ' ')
 +ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')
@@ -764,10 +814,10 @@ index 0000000..9f60a82
 +}
 diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
 new file mode 100644
-index 0000000..b284eae
+index 0000000..701df80
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,178 @@
 +#!/bin/sh
 +# The MU300's OpenWrt settings: what the system needs on every run, and first-install defaults once.
 +#
@@ -806,9 +856,15 @@ index 0000000..b284eae
 +	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
 +	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
 +	uci -q batch <<UCI
-+set system.@system[0].hostname='V50'
-+set system.@system[0].zonename='Europe/Istanbul'
-+set system.@system[0].timezone='<+03>-3'
++set system.@system[0].hostname='ZTE-V50'
++set system.@system[0].zonename='Asia/Shanghai'
++set system.@system[0].timezone='CST-8'
++# The regulatory domain decides which channels may radiate at all (see the note above step 16):
++# with none set, cfg80211 stays on the world domain, every 5 GHz channel is NO-IR, and hostapd refuses
++# to start the AP - the device boots with no hotspot and says nothing. US allows the most power of the
++# countries measured here on 2.4 GHz (30 dBm; BO and CN allow 20) and permits an AP on the low 5 GHz
++# channels too.  Change it with:  uci set wireless.radio0.country='DE'; uci commit wireless; wifi reload
++set wireless.radio0.country='US'
 +set network.lan.ipaddr='$lan_ip'
 +set network.lan.netmask='255.255.255.0'
 +set network.lan.ip6assign='64'
@@ -940,12 +996,148 @@ index 0000000..b284eae
 +	uci commit system
 +fi
 +exit 0
+diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons b/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons
+new file mode 100644
+index 0000000..236226b
+--- /dev/null
++++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons
+@@ -0,0 +1,130 @@
++#!/bin/sh
++# The buttons (Ubuntu and OpenWrt; run by mu300-buttons.service / /etc/init.d/mu300-buttons):
++#   power, short press        wake the LEDs (they go dark after LED_TIMEOUT, see mu300-led)
++#   power, held 3 s           shut down cleanly (the battery-powered U30 Air; the F50 starts again on USB power)
++#   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED shows the band: blue 5, white 2.4)
++#   Wi-Fi key, held 3 s       hotspot off / on
++# The V50 has a single key and it is neither of those (KEY_FN 464, "Function Key" in its device tree):
++#   that key, short press     hotspot 2.4 <-> 5 GHz
++#   that key, held 10 s       reboot
++# Every press lights the LEDs first (`mu300-led wake`: also in mu300-power's idle, and without any daemon), so a key
++# always shows life. Then it wakes mu300-power with the key's name (`mu300-power wake wifi|power`; other keys count as
++# power), in the background: the wake restores whatever is down by looking (hotspot, modem, LEDs, CPU), which can
++# take a minute, and the keys must not wait for it. Idle wakes on any key, a charging boot only on the Wi-Fi key. The
++# band toggle and the hotspot toggle act on an awake device, so the first Wi-Fi press on a sleeping device (idle, or
++# the LEDs held dark) only wakes it. Held power does not wake mu300-power: it leaves the shutdown marker, so the
++# daemon's stop on the way down does not bring the radios back. The hotspot toggle leaves $PST/hotspot-off (with the
++# uptime of the hold) while the user has it off, so neither a wake nor mu300-power's self-check turns it back on; the
++# direction is decided and the marker written before the wake starts, so the wake of the same press cannot undo it.
++# The toggles themselves (hotspot, band) run in the background under a deadline: a later press always shows life.
++# mu300-keys reports the presses; its tick every 5 s lets the LEDs time out. Ubuntu's logind leaves the power key
++# to this script (/etc/systemd/logind.conf.d/mu300-buttons.conf): it used to power the device off at a touch.
++export PATH="$PATH:/opt/mu300/bin:/usr/sbin:/sbin"
++KEY_POWER=116
++KEY_WIFI=138   # "Wifi Switch Key" in the U30 Air's device tree (KEY_HELP's code, as its Android maps it)
++# The V50's board has ONE key and it is neither of the two above: its device tree calls it key-function
++# with linux,code 0x1d0 = 464 = KEY_FN. Nothing matched that code, so on this device every press fell
++# through the case below and did nothing at all - no band switch, no shutdown. Measured, 2026-10-10:
++#   114 KEY_VOLUMEDOWN | 115 KEY_VOLUMEUP | 190 KEY_F20 (key-power) | 464 KEY_FN (key-function)
++KEY_FN=464
++is_openwrt() { [ -e /etc/openwrt_release ]; }
++PST=${MU300_RUN:-/run}/mu300/power
++LEDIDLE=${MU300_SYSROOT:-}/run/mu300/led/.idle   # mu300-led idle on (mu300-led keeps its state there)
++
++DEADLINE=${MU300_BUTTONS_DEADLINE:-150}   # a toggle in the background (the LED sync after wifi up runs 120 s)
++
++# How long a hold is, before it is reported as "long" (mu300-keys -l). 10 s on the V50, whose single
++# key reboots the device; the upstream 3 s everywhere else, for the F50/U30 Air power key. Told by the
++# device tree and not by the model: the V50 reports the same one as the F50 (DEVICE=f50), so the model
++# cannot tell them apart, and key-function is exactly the node that only this board has.
++HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && echo 10000 || echo 3000)}
++
++# --- deadlines (as in mu300-power): "PID PPID" for every process, a process tree killed, a job with a watchdog
++proc_table() {
++    if [ -r /proc/self/stat ]; then
++        for _pt in /proc/[0-9]*; do
++            { read -r _ptl < "$_pt/stat"; } 2>/dev/null || continue
++            _ptl=${_ptl##*) }; _ptl=${_ptl#* }
++            echo "${_pt#/proc/} ${_ptl%% *}"
++        done
++    else
++        ps -A -o pid= -o ppid= 2>/dev/null
++    fi
++}
++# tree_kill PID: the process and everything it started. The tree is stopped until a look finds nothing new (a child
++# forked during one look is caught by the next), then every process any look saw is killed
++tree_kill() {
++    _tk_prev= _tk_seen= _tk_n=0
++    while :; do
++        _tk_all=$(proc_table | awk -v r="$1" '{ pp[$1] = $2 } END { s[r] = 1
++            do { n = 0; for (p in pp) if (!(p in s) && (pp[p] in s)) { s[p] = 1; n++ } } while (n)
++            for (p in s) print p }' | sort -n | tr '\n' ' ')
++        for _tk in $_tk_all; do kill -STOP "$_tk" 2>/dev/null; done
++        _tk_seen="$_tk_seen $_tk_all"   # every process seen: one reparented between looks is killed too
++        _tk_n=$((_tk_n + 1)); [ "$_tk_all" != "$_tk_prev" ] && [ "$_tk_n" -lt 10 ] || break
++        _tk_prev=$_tk_all
++    done
++    for _tk in $_tk_seen; do kill -KILL "$_tk" 2>/dev/null; done
++    return 0
++}
++in_background() {  # in_background SECONDS CMD...: CMD in the background; past SECONDS it and all it started are killed
++    _ib_s=$1; shift
++    ( "$@" & _ib_p=$!
++      ( sleep "$_ib_s"; tree_kill "$_ib_p" ) </dev/null >/dev/null 2>&1 & _ib_w=$!
++      wait "$_ib_p"; kill "$_ib_w" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
++}
++
++probe() {  # probe CMD...: CMD within 5 s (the direction of a hold is decided before the wake; it must not wait long)
++    "$@" </dev/null >/dev/null 2>&1 &
++    _pr_p=$!
++    ( sleep "${MU300_BUTTONS_PROBE_DEADLINE:-5}"; tree_kill "$_pr_p" ) </dev/null >/dev/null 2>&1 &
++    _pr_w=$!
++    wait "$_pr_p"; _pr_rc=$?
++    kill "$_pr_w" 2>/dev/null; wait "$_pr_w" 2>/dev/null
++    return $_pr_rc
++}
++hotspot_is_up() {
++    if is_openwrt; then probe ubus -t 5 call hostapd.wlan0 get_status
++    else probe systemctl is-active --quiet mu300-hotspot; fi
++}
++hotspot_set() {  # hotspot_set on|off: the toggle itself
++    if is_openwrt; then
++        if [ "$1" = off ]; then wifi down; mu300-led wifi off; else wifi up; mu300-led wifi sync 120; fi
++    elif [ "$1" = off ]; then systemctl stop mu300-hotspot
++    else systemctl start mu300-hotspot; fi
++}
++band_toggle() { mu300-wifi-band toggle | logger -t mu300-buttons 2>/dev/null; }
++
++mu300-keys -l "$HOLD" -t 5 | { while read -r code kind; do
++    # the tick every 5 s is no press: it only lets the LEDs time out
++    if [ "$kind" = tick ]; then mu300-led sleep --if-due; continue; fi
++    mu300-led wake   # first, whatever else this key does or whatever state anything is in
++    was_idle=0; s=$(cat "$PST/state" 2>/dev/null); [ -z "$s" ] || [ "$s" = active ] || was_idle=1
++    [ ! -e "$LEDIDLE" ] || was_idle=1   # dark on purpose (idle, or someone's mu300-led idle on): this press only wakes
++    key=power; [ "$code" = "$KEY_WIFI" ] && key=wifi
++    # a Wi-Fi hold on an awake device: which way, and the user's marker, before the wake can look
++    dir=
++    if [ "$code $kind" = "$KEY_WIFI long" ] && [ "$was_idle" != 1 ]; then
++        mkdir -p "$PST" 2>/dev/null
++        if hotspot_is_up; then dir=off; cut -d. -f1 "${MU300_SYSROOT:-}/proc/uptime" > "$PST/hotspot-off" 2>/dev/null
++        else dir=on; rm -f "$PST/hotspot-off"; fi
++    fi
++    # a held power key shuts down instead
++    [ "$code $kind" = "$KEY_POWER long" ] || ( mu300-power wake "$key" ) </dev/null >/dev/null 2>&1 &
++    case "$code $kind" in
++        "$KEY_POWER long")
++            logger -t mu300-buttons "power button held: shutting down" 2>/dev/null
++            mkdir -p "$PST" 2>/dev/null; : > "$PST/shutdown" 2>/dev/null
++            if is_openwrt; then poweroff; else systemctl poweroff; fi ;;
++        "$KEY_WIFI short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
++        "$KEY_WIFI long") [ -z "$dir" ] || in_background "$DEADLINE" hotspot_set "$dir" ;;
++        # The V50's one key: a press switches the hotspot band, a 10 s hold reboots. The marker is left
++        # first for the same reason the hotspot toggle leaves one - a reboot must not be undone by a
++        # wake that puts the radios back.
++        "$KEY_FN short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
++        "$KEY_FN long")
++            logger -t mu300-buttons "V50 key held ${HOLD} ms: rebooting" 2>/dev/null
++            mkdir -p "$PST" 2>/dev/null; : > "$PST/reboot" 2>/dev/null
++            if is_openwrt; then reboot; else systemctl reboot; fi ;;
++    esac
++done; wait; }
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
 new file mode 100644
-index 0000000..9cf7134
+index 0000000..ea2cc58
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,99 @@
 +#!/bin/sh
 +# Report - and if needed repair - the LAN path a client depends on, once per boot.
 +#
@@ -975,13 +1167,53 @@ index 0000000..9cf7134
 +    i=$((i + 1))
 +done
 +
-+# The hotspot must be a port of the LAN bridge; a client that is not attached to it can associate with the
-+# AP and still reach nothing. If it is missing, start Wi-Fi again so netifd attaches it.
-+if [ -d /sys/class/net/wlan0 ] && [ ! -e /sys/class/net/br-lan/brif/wlan0 ]; then
-+    say "wlan0 is not a port of br-lan: starting Wi-Fi again so netifd attaches it"
++# The hotspot has to exist, be a port of the LAN bridge, AND be carrying traffic. All three are needed,
++# and the last two are why this was rewritten (V50, mainline kernel 6.18, 2026-10-10):
++#
++#   * wlan0 sat in the bridge with NO CARRIER and hostapd already given up. The original test asked only
++#     "is wlan0 missing from brif", so it never fired and the device booted with no hotspot, no DHCP
++#     server (udp67=0) and nothing on the device looking wrong.
++#   * on the mainline kernel the FIRST bring-up always fails and a retry always succeeds:
++#         at boot           hostapd: UNINITIALIZED->COUNTRY_UPDATE->DISABLED->AP-DISABLED
++#         wifi down; wifi up  hostapd: COUNTRY_UPDATE->HT_SCAN->ENABLED->AP-ENABLED
++#     `wifi up` alone does not clear it - the interface has to go down first - so every attempt does both.
++#   * and when this runs the interface may not exist yet at all: br-lan gets its address from the lan
++#     interface, which comes up before the wireless one. Guarding the whole block with `[ -d .../wlan0 ]`
++#     (the first version of this fix did) skipped the repair in exactly the case it was written for, and
++#     the log looked like a pass. Wait for wlan0 first, then repair.
++# The regulatory database FIRST, and before the Wi-Fi is restarted below so hostapd picks the country
++# up. cfg80211 asks for regulatory.db long before the rootfs is mounted and that first load always
++# fails ("cfg80211: failed to load regulatory.db"); without it cfg80211 is stuck on the world domain,
++# where EVERY 5 GHz channel is NO-IR, and hostapd refuses to start an AP:
++#
++#     Frequency 5180 (primary) not allowed for AP mode, flags: 0x40853 NO-IR
++#     Could not select hw_mode and channel. (-3)   ->   AP-DISABLED
++#
++# Verified on the device: after this runs, `iw reg set US` reports "country US: DFS-FCC" and the same
++# AP starts on channel 36; before it, `iw reg set` does nothing and the channel is refused. opt/mu300/bin/
++# regdb-load feeds the database through /sys/class/firmware for the pending request and reloads; running
++# it here, after netifd, is what makes the country in 90-mu300 mean anything. (V50, mainline 6.18,
++# 2026-10-10)
++/opt/mu300/bin/regdb-load >/dev/null 2>&1
++
++_wi=0
++while [ $_wi -lt 12 ] && [ ! -d /sys/class/net/wlan0 ]; do
++    sleep 5
++    _wi=$((_wi + 1))
++done
++_repair=0
++while [ $_repair -lt 3 ]; do
++    _st=$(cat /sys/class/net/wlan0/operstate 2>/dev/null)
++    _port=$(ls /sys/class/net/br-lan/brif 2>/dev/null | grep -c '^wlan0$')
++    _has=$( [ -d /sys/class/net/wlan0 ] && echo yes || echo no )
++    [ "$_has" = yes ] && [ "$_st" = up ] && [ "$_port" = 1 ] && break
++    _repair=$((_repair + 1))
++    say "wlan0 not serving (exists=$_has operstate=$_st bridge-port=$_port): wifi down; wifi up (attempt $_repair)"
++    wifi down 2>/dev/null
++    sleep 3
 +    wifi up 2>/dev/null
 +    sleep 20
-+fi
++done
 +
 +br=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\/[0-9]*\).*/\1/p' | tr '\n' ' ')
 +ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')
@@ -1935,6 +2167,67 @@ index 0000000..bdda26b
 +		b = M.v('btn-wifi'); b.className = 'mud-btn' + (wf.up ? ' on' : ''); b.textContent = _('Wi-Fi hotspot');
 +	}
 +});
+diff --git a/rootfs/overlay/opt/mu300/bin/mu300-buttons b/rootfs/overlay/opt/mu300/bin/mu300-buttons
+index 1a99ba9..236226b 100755
+--- a/rootfs/overlay/opt/mu300/bin/mu300-buttons
++++ b/rootfs/overlay/opt/mu300/bin/mu300-buttons
+@@ -4,6 +4,9 @@
+ #   power, held 3 s           shut down cleanly (the battery-powered U30 Air; the F50 starts again on USB power)
+ #   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED shows the band: blue 5, white 2.4)
+ #   Wi-Fi key, held 3 s       hotspot off / on
++# The V50 has a single key and it is neither of those (KEY_FN 464, "Function Key" in its device tree):
++#   that key, short press     hotspot 2.4 <-> 5 GHz
++#   that key, held 10 s       reboot
+ # Every press lights the LEDs first (`mu300-led wake`: also in mu300-power's idle, and without any daemon), so a key
+ # always shows life. Then it wakes mu300-power with the key's name (`mu300-power wake wifi|power`; other keys count as
+ # power), in the background: the wake restores whatever is down by looking (hotspot, modem, LEDs, CPU), which can
+@@ -19,12 +22,23 @@
+ export PATH="$PATH:/opt/mu300/bin:/usr/sbin:/sbin"
+ KEY_POWER=116
+ KEY_WIFI=138   # "Wifi Switch Key" in the U30 Air's device tree (KEY_HELP's code, as its Android maps it)
++# The V50's board has ONE key and it is neither of the two above: its device tree calls it key-function
++# with linux,code 0x1d0 = 464 = KEY_FN. Nothing matched that code, so on this device every press fell
++# through the case below and did nothing at all - no band switch, no shutdown. Measured, 2026-10-10:
++#   114 KEY_VOLUMEDOWN | 115 KEY_VOLUMEUP | 190 KEY_F20 (key-power) | 464 KEY_FN (key-function)
++KEY_FN=464
+ is_openwrt() { [ -e /etc/openwrt_release ]; }
+ PST=${MU300_RUN:-/run}/mu300/power
+ LEDIDLE=${MU300_SYSROOT:-}/run/mu300/led/.idle   # mu300-led idle on (mu300-led keeps its state there)
+ 
+ DEADLINE=${MU300_BUTTONS_DEADLINE:-150}   # a toggle in the background (the LED sync after wifi up runs 120 s)
+ 
++# How long a hold is, before it is reported as "long" (mu300-keys -l). 10 s on the V50, whose single
++# key reboots the device; the upstream 3 s everywhere else, for the F50/U30 Air power key. Told by the
++# device tree and not by the model: the V50 reports the same one as the F50 (DEVICE=f50), so the model
++# cannot tell them apart, and key-function is exactly the node that only this board has.
++HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && echo 10000 || echo 3000)}
++
+ # --- deadlines (as in mu300-power): "PID PPID" for every process, a process tree killed, a job with a watchdog
+ proc_table() {
+     if [ -r /proc/self/stat ]; then
+@@ -81,7 +95,7 @@ hotspot_set() {  # hotspot_set on|off: the toggle itself
+ }
+ band_toggle() { mu300-wifi-band toggle | logger -t mu300-buttons 2>/dev/null; }
+ 
+-mu300-keys -l 3000 -t 5 | { while read -r code kind; do
++mu300-keys -l "$HOLD" -t 5 | { while read -r code kind; do
+     # the tick every 5 s is no press: it only lets the LEDs time out
+     if [ "$kind" = tick ]; then mu300-led sleep --if-due; continue; fi
+     mu300-led wake   # first, whatever else this key does or whatever state anything is in
+@@ -104,5 +118,13 @@ mu300-keys -l 3000 -t 5 | { while read -r code kind; do
+             if is_openwrt; then poweroff; else systemctl poweroff; fi ;;
+         "$KEY_WIFI short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
+         "$KEY_WIFI long") [ -z "$dir" ] || in_background "$DEADLINE" hotspot_set "$dir" ;;
++        # The V50's one key: a press switches the hotspot band, a 10 s hold reboots. The marker is left
++        # first for the same reason the hotspot toggle leaves one - a reboot must not be undone by a
++        # wake that puts the radios back.
++        "$KEY_FN short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
++        "$KEY_FN long")
++            logger -t mu300-buttons "V50 key held ${HOLD} ms: rebooting" 2>/dev/null
++            mkdir -p "$PST" 2>/dev/null; : > "$PST/reboot" 2>/dev/null
++            if is_openwrt; then reboot; else systemctl reboot; fi ;;
+     esac
+ done; wait; }
 diff --git a/rootfs/overlay/opt/mu300/bin/wifi-start b/rootfs/overlay/opt/mu300/bin/wifi-start
 index 3867c7d..e1d8e61 100755
 --- a/rootfs/overlay/opt/mu300/bin/wifi-start

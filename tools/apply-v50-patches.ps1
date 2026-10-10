@@ -263,13 +263,53 @@ while [ $i -lt 24 ]; do
     i=$((i + 1))
 done
 
-# The hotspot must be a port of the LAN bridge; a client that is not attached to it can associate with the
-# AP and still reach nothing. If it is missing, start Wi-Fi again so netifd attaches it.
-if [ -d /sys/class/net/wlan0 ] && [ ! -e /sys/class/net/br-lan/brif/wlan0 ]; then
-    say "wlan0 is not a port of br-lan: starting Wi-Fi again so netifd attaches it"
+# The hotspot has to exist, be a port of the LAN bridge, AND be carrying traffic. All three are needed,
+# and the last two are why this was rewritten (V50, mainline kernel 6.18, 2026-10-10):
+#
+#   * wlan0 sat in the bridge with NO CARRIER and hostapd already given up. The original test asked only
+#     "is wlan0 missing from brif", so it never fired and the device booted with no hotspot, no DHCP
+#     server (udp67=0) and nothing on the device looking wrong.
+#   * on the mainline kernel the FIRST bring-up always fails and a retry always succeeds:
+#         at boot           hostapd: UNINITIALIZED->COUNTRY_UPDATE->DISABLED->AP-DISABLED
+#         wifi down; wifi up  hostapd: COUNTRY_UPDATE->HT_SCAN->ENABLED->AP-ENABLED
+#     `wifi up` alone does not clear it - the interface has to go down first - so every attempt does both.
+#   * and when this runs the interface may not exist yet at all: br-lan gets its address from the lan
+#     interface, which comes up before the wireless one. Guarding the whole block with `[ -d .../wlan0 ]`
+#     (the first version of this fix did) skipped the repair in exactly the case it was written for, and
+#     the log looked like a pass. Wait for wlan0 first, then repair.
+# The regulatory database FIRST, and before the Wi-Fi is restarted below so hostapd picks the country
+# up. cfg80211 asks for regulatory.db long before the rootfs is mounted and that first load always
+# fails ("cfg80211: failed to load regulatory.db"); without it cfg80211 is stuck on the world domain,
+# where EVERY 5 GHz channel is NO-IR, and hostapd refuses to start an AP:
+#
+#     Frequency 5180 (primary) not allowed for AP mode, flags: 0x40853 NO-IR
+#     Could not select hw_mode and channel. (-3)   ->   AP-DISABLED
+#
+# Verified on the device: after this runs, `iw reg set US` reports "country US: DFS-FCC" and the same
+# AP starts on channel 36; before it, `iw reg set` does nothing and the channel is refused. opt/mu300/bin/
+# regdb-load feeds the database through /sys/class/firmware for the pending request and reloads; running
+# it here, after netifd, is what makes the country in 90-mu300 mean anything. (V50, mainline 6.18,
+# 2026-10-10)
+/opt/mu300/bin/regdb-load >/dev/null 2>&1
+
+_wi=0
+while [ $_wi -lt 12 ] && [ ! -d /sys/class/net/wlan0 ]; do
+    sleep 5
+    _wi=$((_wi + 1))
+done
+_repair=0
+while [ $_repair -lt 3 ]; do
+    _st=$(cat /sys/class/net/wlan0/operstate 2>/dev/null)
+    _port=$(ls /sys/class/net/br-lan/brif 2>/dev/null | grep -c '^wlan0$')
+    _has=$( [ -d /sys/class/net/wlan0 ] && echo yes || echo no )
+    [ "$_has" = yes ] && [ "$_st" = up ] && [ "$_port" = 1 ] && break
+    _repair=$((_repair + 1))
+    say "wlan0 not serving (exists=$_has operstate=$_st bridge-port=$_port): wifi down; wifi up (attempt $_repair)"
+    wifi down 2>/dev/null
+    sleep 3
     wifi up 2>/dev/null
     sleep 20
-fi
+done
 
 br=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\/[0-9]*\).*/\1/p' | tr '\n' ' ')
 ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')
@@ -381,7 +421,7 @@ $voNew = "            print(f'{a.out}: {n} modules for {krel}')" + "`n" +
 Patch "$Repo\tools\vendor-overlay.py" $voOld $voNew 'vendor-overlay.py: pack openwrt/vendor-extra/'
 
 Write-Host ""
-Write-Host "=== 7. mirror every patched OpenWrt file into the vendor overlay ==="# The important half. A machine installed from a PREBUILT release downloads that release's rootfs tarball
+Write-Host "=== 7. mirror every patched OpenWrt file into the vendor overlay (list; runs at the end) ==="# The important half. A machine installed from a PREBUILT release downloads that release's rootfs tarball
 # and never reads openwrt/overlay/ - so patches 3, 4 and 5 would silently do nothing. tools/vendor-overlay.py
 # packs openwrt/vendor-extra/ into mu300-vendor-<os>.tar.gz, and android-install.sh unpacks that OVER the
 # system, after the rootfs. Mirroring the patched files there is what makes them take effect.
@@ -391,6 +431,10 @@ $mirror = @(
     'etc\hotplug.d\iface\10-mu300-usb',
     'etc\uci-defaults\90-mu300',
     'opt\mu300\bin\mu300-lancheck',
+    # mu300-buttons lives in rootfs/overlay/, which build-rootfs.sh mounts at /in/opt-mu300 and copies
+    # to /opt/mu300 - but a PREBUILT install never runs build-rootfs.sh, so this has to come through
+    # vendor-extra as well or the V50's key keeps doing nothing on such a device.
+    'opt\mu300\bin\mu300-buttons=rootfs\overlay\opt\mu300\bin\mu300-buttons',
     # apk's package feed. Overwrites the download root baked into the rootfs tarball, so a device
     # installed from a prebuilt release fetches packages from a mirror instead (see step 16).
     'etc\apk\repositories.d\distfeeds.list',
@@ -401,6 +445,7 @@ $mirror = @(
     # prebuilt install needs its own copy of it or the page keeps running the unpatched script.
     'www\luci-static\resources\view\mu300\home.js=openwrt\luci-app-mu300\htdocs\luci-static\resources\view\mu300\home.js'
 )
+function Mirror-VendorExtras {
 $dst = "$Repo\openwrt\vendor-extra"
 foreach ($entry in $mirror) {
     $parts = $entry -split '=', 2
@@ -411,6 +456,7 @@ foreach ($entry in $mirror) {
     New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
     Copy-Item $src $out -Force
     Write-Host ("  mirrored: {0}" -f $rel)
+}
 }
 
 Write-Host ""
@@ -698,7 +744,7 @@ $homeDnsNew = (@'
 Patch $homeFile $homeDnsOld $homeDnsNew 'home.js: one resolver per line'
 
 Write-Host ""
-Write-Host "=== 16. display name only: the hostname says V50, nothing functional moves ==="
+Write-Host "=== 16. what a person reads: hostname, time zone, and the wireless country ==="
 # LAYER 3 of the V50 identity work, and deliberately the ONLY thing renamed anywhere.
 #
 # The question this settles: should the whole project be re-badged from MU300/F50 to V50/MU3351?
@@ -727,9 +773,64 @@ Write-Host "=== 16. display name only: the hostname says V50, nothing functional
 # an English msgid orphans its zh-cn/tr entry in the compiled .lmo catalogs, which would put mixed
 # languages on a page that is otherwise fully translated. That is worse than the status quo, and the
 # statement itself is true of the V50 as well.
-$hostOld = "set system.@system[0].hostname='mu300'"
-$hostNew = "set system.@system[0].hostname='V50'"
-Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $hostOld $hostNew '90-mu300: hostname V50 (display only)'
+# The rest of what a person reads, and the one setting that decides whether the hotspot can exist at
+# all. Rewritten by regex rather than with Patch() because this patch used to write 'V50' as the
+# hostname: a plain find/replace against the upstream value would MISS on a tree this patch has
+# already touched, which is exactly the case a re-run has to handle.
+#
+# timezone: upstream ships Europe/Istanbul (the project's origin). Asia/Shanghai is UTC+8 with no DST,
+# so '<+03>-3' (a fixed offset) becomes 'CST-8'.
+#
+# country: with no country set, cfg80211 stays on the world domain ('country 00'), and on that domain
+# EVERY 5 GHz channel carries NO-IR - no initiating radiation - so hostapd cannot start an AP there:
+#
+#   Frequency 5180 (primary) not allowed for AP mode, flags: 0x40853 NO-IR
+#   Could not select hw_mode and channel. (-3)
+#   wlan0: interface state COUNTRY_UPDATE->DISABLED / AP-DISABLED
+#
+# and the device comes up with no hotspot and no DHCP server, with nothing on the device looking wrong.
+# That is what the V50 did on the mainline kernel until this line existed.
+#
+# Which country: the one that allows the most power. Measured with iw reg get on this device:
+#
+#   2.4 GHz    US 30 dBm   |  BO 20  |  CN 20  |  TR/DE 20   <- US is double the next best
+#   5 GHz low  US 23 dBm (no NO-IR, so an AP is allowed)  |  BO/CN/JP 20-23 with restrictions
+#   5 GHz high US 30 dBm   |  BO 30  |  CN 33 (5.8 GHz band only)
+#
+# US it is: it caps 2.4 GHz - the band that works in every regulatory state - at 30 dBm, and unlike BO
+# it allows an AP on the low 5 GHz channels as well. The hardware caps what it can actually radiate;
+# this only removes the regulatory ceiling. Changeable at any time:
+#   uci set wireless.radio0.country='DE'; uci commit wireless; wifi reload
+#
+# The database that gives these numbers has to be loaded for the country to mean anything: cfg80211
+# asks for regulatory.db before the rootfs is mounted and that first load always fails
+# ("cfg80211: failed to load regulatory.db"). mu300-lancheck feeds it again every boot - see step 5.
+$identityFile = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"
+$identityText = [IO.File]::ReadAllText($identityFile) -replace "`r`n", "`n"
+$identityBefore = $identityText
+$identityText = [regex]::Replace($identityText, "set system\.@system\[0\]\.hostname='(?:mu300|V50)'", "set system.@system[0].hostname='ZTE-V50'")
+$identityText = [regex]::Replace($identityText, "set system\.@system\[0\]\.zonename='[^']*'", "set system.@system[0].zonename='Asia/Shanghai'")
+$identityText = [regex]::Replace($identityText, "set system\.@system\[0\]\.timezone='[^']*'", "set system.@system[0].timezone='CST-8'")
+if (-not $identityText.Contains("set wireless.radio0.country='US'")) {
+    $tzLine = "set system.@system[0].timezone='CST-8'"
+    $countryBlock = @'
+# The regulatory domain decides which channels may radiate at all (see the note above step 16):
+# with none set, cfg80211 stays on the world domain, every 5 GHz channel is NO-IR, and hostapd refuses
+# to start the AP - the device boots with no hotspot and says nothing. US allows the most power of the
+# countries measured here on 2.4 GHz (30 dBm; BO and CN allow 20) and permits an AP on the low 5 GHz
+# channels too.  Change it with:  uci set wireless.radio0.country='DE'; uci commit wireless; wifi reload
+set wireless.radio0.country='US'
+'@
+    $countryBlock = $countryBlock.TrimEnd("`n") -replace "`r`n", "`n"
+    $identityText = $identityText.Replace($tzLine, $tzLine + "`n" + $countryBlock)
+}
+if ($identityText -ne $identityBefore) {
+    [IO.File]::WriteAllText($identityFile, $identityText, (New-Object Text.UTF8Encoding($false)))
+    Write-Host "  patched: 90-mu300 hostname/timezone/country"
+    $patched++
+} else {
+    Write-Host "  already: 90-mu300 hostname/timezone/country"
+}
 
 Write-Host ""
 Write-Host "=== 17. point apk at a mirror that actually carries this release ==="
@@ -827,6 +928,16 @@ if ($hosts[0] -eq 'repo.huaweicloud.com') {
     throw "apk feed: repo.huaweicloud.com answers 200 with an HTML page for missing paths - it will pass a HEAD probe and still be unusable"
 }
 Write-Host "  ok: 8 index URLs, mirror $($hosts[0])"
+
+Write-Host ""
+Write-Host "=== 17b. mirror the patched files into the vendor overlay (defined in step 7) ==="
+# It has to run HERE, after every content edit above, and it used to run at step 7. Steps 10-16 edit
+# openwrt/overlay/ and openwrt/luci-app-mu300/ AFTER that point, so a single clean run copied the
+# pre-edit files and left the vendor tarball one run behind: a device installed from a prebuilt
+# release - which unpacks vendor-extra and never reads openwrt/overlay/ - got the previous version of
+# 90-mu300, 10-mu300-usb and dashboard-info, while the tree here looked fully patched. Repeated runs
+# hid it, because each run copied the previous run's finished files.
+Mirror-VendorExtras
 
 Write-Host ""
 Write-Host "=== 18. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="

@@ -10,7 +10,7 @@
 | 上游项目 | [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)（MIT） |
 | 验证版本 | 上游 **v2026.10.12** + 本仓库 18 步补丁 |
 | 系统 | Android 13 + OpenWrt 25.12.5（`openwrt-luci` 面板版） |
-| 内核 | 5.4.254（vendor 基线） |
+| 内核 | **5.4.254**（vendor 基线）或 **6.18.55**（主线，实测可用）。安装向导本来就会问，已装设备可 `mu300-update kernel` 就地切换、`rollback-boot` 回退。见 `docs/07-6.18内核与按键与监管域.md` |
 | 风险 | 低。不动 `boot_a` / GPT / `userdata`；只写 Linux 区、`boot_b`、`misc` 的 32 字节 |
 
 ---
@@ -21,7 +21,9 @@
 |---|---|
 | **WiFi 热点可连且能拿 IP** | 广播热点，客户端自动获得 `192.168.77.100-249` 段地址，能上网 |
 | **USB 网络可选** | 切成 RNDIS 后 PC 出现网卡并拿到 LAN 地址，USB 也能上网 |
-| 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。**8 流并发经 RNDIS 聚合达 681 Mbps**（USB 2.0 理论上限仅 426 Mbps → 链路确为 USB 3.0）。测法见 `docs/06-OpenWrt操作手册.md` 附录 |
+| 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。链路经实测确为 **USB 3.0 SuperSpeed**（`bcdUSB 0x0320` / `current_speed=super-speed`），但单条 TCP 流只能拿到 300–400 Mbps，想跑满要**多流并发**。测法与「一种会被 `nc` 循环伪装成"不扩展"的错测法」见 `docs/06-OpenWrt操作手册.md` 附录 |
+| **实体按键** | 短按：热点 **2.4GHz ↔ 5GHz**；按住 **10 秒**：重启设备（V50 的键报 KEY_FN=464，上游只认 116/138，故原先无反应。见 §4.6） |
+| **无线国家码** | 默认 `US`：2.4GHz 允许 **30 dBm**（BO/CN 只有 20），且允许低段 5GHz 起 AP |
 | 管理 | `ssh root@192.168.77.1`；LuCI `http://192.168.77.1/cgi-bin/luci/` |
 | 一键切换 | 在 Android 侧一条命令进 OpenWrt；在 OpenWrt 里重启即回 Android |
 | 救砖通道 | USB 串口 COM12（115200）直接给 root shell，不怕网络配坏 |
@@ -130,8 +132,9 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 13 | **修正 `board.json` 里的 `eth0`**（改成实际的 `br-lan`） | LuCI 端口状态永远显示一个**不存在的 `eth0` 未连接**（armsr 基础镜像的残留） |
 | 14 | **状态看板的 USB 指示器按实际网卡名取数**（`usb0` 或 `rndis0`） | 看板的「USB 网络」永远显示**未连接**，哪怕链路正通（RNDIS 模式下网卡叫 `rndis0`） |
 | 15 | **状态看板的 DNS 改用 `jsonfilter` 解析** | 原来的 sed 模式**永远匹配不上**，`DNS` 一栏永远是 `--`，哪怕 WAN 上配着两个 DNS |
-| 16 | **主机名改成 `V50`**（纯展示层） | shell 提示符与页面标题仍写着上一台设备的 `mu300` |
+| 16 | **主机名 `ZTE-V50`、时区 `Asia/Shanghai`、无线国家码 `US`** | 提示符/页面标题还是旧名、时区是 +03、5GHz 因监管域起不了 AP（见 §4.4） |
 | 17 | **apk 软件源指向清华 TUNA 镜像** | 4G 下官方源慢 2.25 倍；换成阿里云则**根本装不了包**（见 §4.3） |
+| 17b | 把上面改过的文件镜像进 `openwrt/vendor-extra/`（**必须在所有内容修改之后**） | 预编译安装只读 vendor-extra，镜像早了就发出去未修补的版本（见 §4.5） |
 | 18 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
 
 ### 4.1 第 15 步：为什么 DNS 那一栏永远是 `--`
@@ -191,6 +194,67 @@ OpenWrt 25.12 用 **apk**（不是 opkg），源文件是 `/etc/apk/repositories
 
 清华的索引与官方**逐字节相同**（sha256 一致，110251 字节），不是改过的内容。
 改回官方只需换主机名，路径一个字不用动。详见 `docs/06-OpenWrt操作手册.md` §10。
+
+### 4.4 5GHz 热点为什么起不来：监管域（以及为什么没人报错）
+
+症状是 hostapd 直接失败、**设备上任何地方都不报错**：
+
+```
+hostapd: Frequency 5180 (primary) not allowed for AP mode, flags: 0x40853 NO-IR
+hostapd: Could not select hw_mode and channel. (-3)   →  AP-DISABLED
+```
+
+链条是：`cfg80211` 在 rootfs 挂载**之前**就要 `regulatory.db`，那次必然失败
+（`failed to load regulatory.db`）→ cfg80211 停在**世界域** → 世界域里 5GHz 全是 `NO-IR`
+（禁止主动发射）→ hostapd 不能在该信道起 AP。
+
+实测确认：手动跑一次 `regdb-load` 之后，`iw reg set TR/CN/US/BO` **立刻全部生效**；不跑则
+`iw reg set` 无效、信道照样被拒。
+
+**修法**：`mu300-lancheck` 每次开机**先补喂 `regdb-load`，再**按 `operstate` + 网桥端口判断并
+`wifi down; wifi up` 重试（最多 3 轮）。顺序重要——必须在重启无线之前，hostapd 才能读到国家码。
+
+> 判据必须是 `operstate`，不能只看「是不是网桥端口」：6.18 上 wlan0 **一直在网桥里**，是**射频**
+> 起不来，旧判据从不触发、日志看着像通过。
+
+### 4.5 第 17b 步：镜像必须排在所有修改之后
+
+第 7 步原本既定义镜像清单**又**执行拷贝，而第 10/12/13/16 步在那之后还会继续改
+`openwrt/overlay/`。后果：**单次干净运行产出的 vendor-extra 是改动前的内容**，而预编译安装
+只读 vendor-extra —— 那样的设备会拿到未修补的 `90-mu300` / `10-mu300-usb` / `dashboard-info`，
+本仓库却看上去一切正常。重复运行会掩盖它（每次拷的是上一轮的成品）。
+
+已改成函数 `Mirror-VendorExtras`，在第 17b 步（所有内容修改之后、编码门禁之前）调用。
+**同类盲区**：`mu300-buttons` 只在 `rootfs/overlay/` 里，原先不在镜像清单内，会同样漏掉，已补上。
+
+---
+
+## 4.6 实体按键：短按切 2.4/5GHz，长按 10 秒重启
+
+> **前提**：`mu300-buttons` 只认上游的 `KEY_POWER=116` / `KEY_WIFI=138`（U30 Air 的键）。
+> **V50 一个都不报**，所以按键此前完全没反应。
+
+V50 实测键码（解 `/dev/input/event0` 得到）：
+
+| 设备树节点 | `linux,code` | 十进制 | 备注 |
+|---|---|---|---|
+| `key-power` | `0xBE` | 190 | KEY_F20 |
+| `key-volumedown` / `key-volumeup` | `0x72` / `0x73` | 114 / 115 | |
+| **`key-function`** | `0x1D0` | **464** | **KEY_FN —— V50 唯一的实体键** |
+
+绑定后：**短按** → `mu300-wifi-band toggle`（2g/ch6 ↔ 5g/ch36）；**长按 10 秒** → `reboot`。
+长按阈值按设备树判断（`key-function` 节点只有 V50 有，模型字符串与 F50 相同，分不出来）：
+
+```sh
+HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && echo 10000 || echo 3000)}
+```
+
+实测：短按 → `band` 由 `2g ch=6` 变 `5g ch=36` ✅；长按 10 秒 → 重启并自动恢复热点 ✅。
+
+> 按键"没反应"时，先看 `/run/mu300/power/state` 是否 `active`、`mu300-power daemon` 是否在跑 ——
+> 上游逻辑里 **idle 状态下的第一次按下只唤醒、不执行动作**，别一上来就怀疑键码。
+
+完整记录（含 6.18/7.2 内核切换与回退）见 `docs/07-6.18内核与按键与监管域.md`。
 
 ---
 
@@ -329,6 +393,7 @@ docs/
   04-WiFi与DHCP根因分析.md   三个根因的完整证据链（WiFi 不广播 / DHCP 拿不到 IP / 路由冲突）
   05-一键复刻指南.md         分阶段清单式复刻步骤 + 验收清单
   06-OpenWrt操作手册.md      刷完后的日常操作（各通道、坑、能力清单）
+07-6.18内核与按键与监管域.md 6.18/7.2 内核切换（含 rollback）、5GHz 监管域根因、实体按键键码与映射
 tools/
   apply-v50-patches.ps1     18 步补丁（幂等，含编码门禁）★核心
   backup-v50-partitions.ps1 28 分区备份 + sha256 校验
