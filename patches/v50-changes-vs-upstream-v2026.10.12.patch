@@ -254,7 +254,7 @@ index 5624030..9f60a82 100755
  	procd_close_instance
  }
 diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
-index 2aab62b..c519a17 100755
+index 2aab62b..9dcb5a6 100755
 --- a/openwrt/overlay/etc/uci-defaults/90-mu300
 +++ b/openwrt/overlay/etc/uci-defaults/90-mu300
 @@ -59,7 +59,15 @@ if [ "$run" != done ]; then
@@ -274,7 +274,23 @@ index 2aab62b..c519a17 100755
  	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
  fi
  
-@@ -99,6 +107,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
+@@ -70,6 +78,15 @@ set network.wan.proto='mu300cell'
+ UCI
+ # the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)
+ [ -z "$dev" ] || uci set network.$dev.bridge_empty='1'
++# board.json names the LAN device "eth0" - a leftover from the armsr target, on a board that has no
++# eth0. LuCI's status page reads it as the builtin ethernet ports, so it listed a port that can never
++# come up and reported it as disconnected for ever. config_generate writes this file only when the
++# image is built, so the stale value survives every install and every update; nothing else fixes it.
++# The UCI side is already right, so copy that across. (V50, 2026-10-10)
++mu300_board_dev=$(uci -q get network.lan.device)
++if [ -n "$mu300_board_dev" ] && [ -f /etc/board.json ]; then
++	sed -i "s/\"device\": \"eth0\"/\"device\": \"$mu300_board_dev\"/" /etc/board.json 2>/dev/null || true
++fi
+ # K25 (ported from the kanoqwq fork, cd4fb28): the USB host keeps the address it had from the early server, and
+ # dnsmasq broadcasts its OFFER/ACK: Windows can keep asking for the early lease after it has already removed that
+ # address, and a unicast reply to the removed address is lost in the NCM host stack. The address is the one preinit's
+@@ -99,6 +116,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
  	uci set firewall.$early.output='ACCEPT'
  	uci set firewall.$early.forward='REJECT'
  fi
@@ -584,10 +600,10 @@ index 0000000..9f60a82
 +}
 diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
 new file mode 100644
-index 0000000..2aab62b
+index 0000000..9dcb5a6
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,172 @@
 +#!/bin/sh
 +# The MU300's OpenWrt settings: what the system needs on every run, and first-install defaults once.
 +#
@@ -649,7 +665,15 @@ index 0000000..2aab62b
 +	# Forwarded TCP/UDP through the kernel's software flowtable (fw4 puts sipa_eth0 in it: patches/fw4-sipa-offload.patch).
 +	# The Unisoc SIPA and SC2355 drivers have no nftables hardware flow offload. (mu300-ttl turns it off while a TTL
 +	# is set.)
-+	uci -q set firewall.@defaults[0].flow_offloading='1'
++	# Flow offload stays OFF (V50, 2026-10-10).
++	# It was on, and it broke forwarding: the WAN's device appears only after the modem
++	# dials, so fw4 renders accept_to_wan empty at boot, and the hotplug that would fix it
++	# (hotplug.d/iface/20-firewall, which runs 'fw4 -q reload') cannot: replacing the
++	# flowtable while flows are in it fails with Resource busy, and -q hides the error.
++	# Every forwarded TCP was then RST by handle_reject, while the router's own DNS kept
++	# working - so it reads as 'the hotspot has no DNS'. See docs/04-WiFi与DHCP根因分析.md.
++	# SIPA and SC2355 have no hardware offload anyway, so little is lost.
++	uci -q set firewall.@defaults[0].flow_offloading='0'
 +	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 +fi
 +
@@ -660,6 +684,15 @@ index 0000000..2aab62b
 +UCI
 +# the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)
 +[ -z "$dev" ] || uci set network.$dev.bridge_empty='1'
++# board.json names the LAN device "eth0" - a leftover from the armsr target, on a board that has no
++# eth0. LuCI's status page reads it as the builtin ethernet ports, so it listed a port that can never
++# come up and reported it as disconnected for ever. config_generate writes this file only when the
++# image is built, so the stale value survives every install and every update; nothing else fixes it.
++# The UCI side is already right, so copy that across. (V50, 2026-10-10)
++mu300_board_dev=$(uci -q get network.lan.device)
++if [ -n "$mu300_board_dev" ] && [ -f /etc/board.json ]; then
++	sed -i "s/\"device\": \"eth0\"/\"device\": \"$mu300_board_dev\"/" /etc/board.json 2>/dev/null || true
++fi
 +# K25 (ported from the kanoqwq fork, cd4fb28): the USB host keeps the address it had from the early server, and
 +# dnsmasq broadcasts its OFFER/ACK: Windows can keep asking for the early lease after it has already removed that
 +# address, and a unicast reply to the removed address is lost in the NCM host stack. The address is the one preinit's
@@ -688,6 +721,20 @@ index 0000000..2aab62b
 +	uci set firewall.$early.input='ACCEPT'
 +	uci set firewall.$early.output='ACCEPT'
 +	uci set firewall.$early.forward='REJECT'
++fi
++# K28 (V50, 2026-10-10): the lan zone has to own the bridge itself, not only its ports.
++#
++# fw4 derives a zone's interfaces from the ports of the network's bridge device. br-lan is declared
++# bridge_empty, and wlan0 only joins it when netifd brings the AP up - after fw4 has rendered the
++# ruleset. The lan zone then owns nothing: no jump for br-lan in the input chain, policy drop, and
++# every packet a client sends is discarded. Nothing reports it - /etc/config/firewall says
++# input='ACCEPT' either way, the AP is up and dnsmasq is listening - so a client that associates simply
++# never gets a lease. Naming the bridge costs nothing and a later port cannot undo it.
++lan_dev=$(uci -q get network.lan.device)
++if [ -n "$lan_dev" ]; then
++	for z in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)\.name='lan'$/\1/p"); do
++		uci -q get "firewall.$z.device" | grep -qx "$lan_dev" || uci add_list "firewall.$z.device=$lan_dev"
++	done
 +fi
 +# LuCI's language (both systems) is English, not "auto" (which follows the browser): once, with its own marker
 +# luci.mu300.lang, so a language the user picks later stays through every update. A system from before the marker

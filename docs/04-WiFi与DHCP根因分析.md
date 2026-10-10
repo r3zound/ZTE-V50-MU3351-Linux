@@ -365,6 +365,56 @@ release 镜像，记录在 Android 的 `/data/adb/mu300-linux-password.txt`—�
 
 ---
 
+## 附：LuCI 端口状态里的幽灵 `eth0`
+
+**症状**：`http://192.168.77.1/cgi-bin/luci/admin/status/overview` 的「端口状态」里有一个
+`eth0` 永远显示**未连接**，而这台设备上根本没有 `eth0`。
+
+**真因**：`/etc/board.json` 里写着
+
+```json
+"network": { "lan": { "device": "eth0", "protocol": "static" } }
+```
+
+这是 **armsr/armv8 通用目标**的基础镜像假设（`/etc/board.d/02_network` 与 `99-default_network`
+写死的），而 V50 的 LAN 是一个只承载 USB gadget 与 AP 的网桥 `br-lan`。
+
+LuCI 的端口状态页读的正是这个字段：
+
+```
+luci getBuiltinEthernetPorts  →  [{"role":"lan","device":"eth0"}]
+```
+
+（实现：`/www/luci-static/resources/view/status/include/29_ports.js` 调
+`luci.getBuiltinEthernetPorts`，后者读 `board.json`。）
+
+**为什么不会被自动修好**：`board.json` 只在**镜像构建时**由 `config_generate` 生成一次，
+所以这个过期的值能活过每一次安装和每一次更新 —— 没有任何机制会去纠正它。
+
+**修法**：UCI 那边本来就是对的（`network.lan.device='br-lan'`），把它抄过去即可。
+已写进 `90-mu300`（补丁脚本第 13 步）：
+
+```sh
+mu300_board_dev=$(uci -q get network.lan.device)
+if [ -n "$mu300_board_dev" ] && [ -f /etc/board.json ]; then
+	sed -i "s/\"device\": \"eth0\"/\"device\": \"$mu300_board_dev\"/" /etc/board.json 2>/dev/null || true
+fi
+```
+
+实测（造故障 → 修好 → 再跑一次确认幂等）：
+
+```
+1. sed 改回 eth0            → "device": "eth0"
+2. 执行上面那段              → "device": "br-lan"
+3. 再执行一次                → "device": "br-lan"（幂等）
+luci getBuiltinEthernetPorts → [{"role":"lan","device":"br-lan"}]   （up、carrier: true）
+```
+
+> 顺带说明：这台设备**确实没有任何以太网口**，所以端口状态一栏本身意义有限；
+> 但显示一个不存在的端口并标成"未连接"是明确的错误信息，会让人以为硬件有问题。
+
+---
+
 ## 还没做的
 
 - 设备上 `/etc/uci-defaults/90-mu300` 和 `opt/mu300/bin/mu300-lancheck` 还是旧版本。

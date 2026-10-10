@@ -126,7 +126,8 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 10 | **lan 防火墙上显式加 `br-lan`** | **客户端能连上却拿不到 IP**（最隐蔽的一个） |
 | 11 | **`rndis0` 加入网桥后再清一次地址** | 用 RNDIS 时产生重复路由，WiFi 连 ping 都不通 |
 | 12 | **关掉 flow offload**（`accept_to_wan` 为空 + `fw4 reload` 被 `Resource busy` 挡住） | **转发的 TCP 全被 RST**：客户端能解析域名却打不开任何网页，像「没有 DNS」 |
-| 13 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
+| 13 | **修正 `board.json` 里的 `eth0`**（改成实际的 `br-lan`） | LuCI 端口状态永远显示一个**不存在的 `eth0` 未连接**（armsr 基础镜像的残留） |
+| 14 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
 
 ### 4.1 为什么第 6/7 步是必需的
 
@@ -329,6 +330,7 @@ probe/
 |---|---|---|
 | 能关联热点，但拿不到 IP / ping 不通 | fw4 的 lan 区是空的 | 5.1 |
 | **能解析域名、能 ping 通网关，但打不开任何网页** | `accept_to_wan` 为空 + flow offload 挡住了 `fw4 reload` | 第 4 节第 12 步（`nft list chain inet fw4 accept_to_wan` 为空即命中） |
+| **LuCI 端口状态显示一个不存在的 `eth0`「未连接」** | armsr 基础镜像的 `board.json` 把 LAN 设备写成 `eth0` | 第 4 节第 13 步 |
 | 热点根本不广播，但 SSH 正常 | `mu300-hw` 编码坏了（BOM/UTF-16） | 5.2 |
 | WiFi 连 ping 都不通，USB 口却正常 | 两条重复路由 | 5.3 |
 | 切不进 Linux，报「not Linux」 | boot 镜像命令行被改过 | 第 4 节补丁第 2/2b 步 |

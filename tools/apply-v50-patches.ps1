@@ -563,7 +563,38 @@ $flowNew = $T + "# Flow offload stays OFF (V50, 2026-10-10)." + "`n" +
 Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $flowOld $flowNew '90-mu300: keep flow offloading off'
 
 Write-Host ""
-Write-Host "=== 13. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 13. board.json: name the LAN device this board actually has ==="
+# /etc/board.json ships from the armsr/armv8 generic target and declares the LAN device as "eth0".
+# This board has no eth0 at all - its LAN is a bridge carrying the USB gadget and the AP. LuCI's
+# status page reads exactly this field (`luci getBuiltinEthernetPorts`, rendered by
+# view/status/include/29_ports.js), so it listed a port that can never come up and reported it as
+# "disconnected" for ever, next to the real LAN.
+#
+# config_generate writes board.json only when the image is built, so the stale value survives every
+# install AND every update - nothing else would ever correct it. The UCI side is already right
+# (network.lan.device is the bridge), so the fix is to copy that value across.
+#
+# Measured on the V50, 2026-10-10:
+#   before: luci getBuiltinEthernetPorts -> [{"role":"lan","device":"eth0"}]
+#   after : luci getBuiltinEthernetPorts -> [{"role":"lan","device":"br-lan"}]   (up, carrier: true)
+$boardOld = "# the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)" + "`n" +
+            "[ -z `"`$dev`" ] || uci set network.`$dev.bridge_empty='1'"
+$boardNew = $boardOld + "`n" + (@'
+# board.json names the LAN device "eth0" - a leftover from the armsr target, on a board that has no
+# eth0. LuCI's status page reads it as the builtin ethernet ports, so it listed a port that can never
+# come up and reported it as disconnected for ever. config_generate writes this file only when the
+# image is built, so the stale value survives every install and every update; nothing else fixes it.
+# The UCI side is already right, so copy that across. (V50, 2026-10-10)
+mu300_board_dev=$(uci -q get network.lan.device)
+if [ -n "$mu300_board_dev" ] && [ -f /etc/board.json ]; then
+	sed -i "s/\"device\": \"eth0\"/\"device\": \"$mu300_board_dev\"/" /etc/board.json 2>/dev/null || true
+fi
+'@) -replace "`r`n", "`n"
+$boardNew = $boardNew.TrimEnd("`n")
+Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $boardOld $boardNew '90-mu300: board.json names the real LAN device'
+
+Write-Host ""
+Write-Host "=== 14. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so
