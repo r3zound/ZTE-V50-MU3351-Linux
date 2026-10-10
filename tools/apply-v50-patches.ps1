@@ -1,7 +1,10 @@
 # Re-apply the V50 port patches to a fresh checkout of dikeckaan/mu300-linux.
 # Run once, after `git clone`, before running install.ps1.
 #
-# Three patches, all idempotent (each one checks for its own marker first):
+# Seventeen steps, all idempotent (each one checks for its own marker first): steps 1-15 patch
+# upstream files, 16 writes the apk feed, 17 is an encoding gate over everything that ships.
+# The three headline problems each early step fixes are listed here; every step carries its own
+# longer note explaining why the naive fix does not work.
 #
 #   1. Device detection (install.sh + install.ps1). V50 reports "V50 / MU3351", which matches none of the
 #      project's patterns, so the installer treats it as "not an F50" and stops. install.ps1 carries THREE
@@ -388,6 +391,9 @@ $mirror = @(
     'etc\hotplug.d\iface\10-mu300-usb',
     'etc\uci-defaults\90-mu300',
     'opt\mu300\bin\mu300-lancheck',
+    # apk's package feed. Overwrites the download root baked into the rootfs tarball, so a device
+    # installed from a prebuilt release fetches packages from a mirror instead (see step 16).
+    'etc\apk\repositories.d\distfeeds.list',
     # "dest=source" when the file does not live under openwrt/overlay/: the dashboard backend is a
     # package file (openwrt/luci-app-mu300/root/), so it is named explicitly here.
     'usr\libexec\unisoc-modem\dashboard-info=openwrt\luci-app-mu300\root\usr\libexec\unisoc-modem\dashboard-info'
@@ -666,7 +672,104 @@ $hostNew = "set system.@system[0].hostname='V50'"
 Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $hostOld $hostNew '90-mu300: hostname V50 (display only)'
 
 Write-Host ""
-Write-Host "=== 16. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 16. point apk at a mirror that actually carries this release ==="
+# OpenWrt 25.12 uses apk, and /etc/apk/repositories.d/distfeeds.list ships pointing at
+# downloads.openwrt.org. This device reaches the internet over 4G, where that host is slow -
+# measured here: the same 8 indexes take 18 s against upstream and 8 s against the Tsinghua
+# mirror, and `apk update` takes 7 s versus 4 s.
+#
+# The mirror is not a free choice, and the obvious one is the wrong one:
+# mirrors.aliyun.com/openwrt does NOT carry 25.12.5 (its releases/ tree stops at 25.12.0-rc2,
+# the release this image is built from - openwrt/build-rootfs.sh, MU300_WRT_VER). All 8 index
+# URLs 404 there, `apk update` exits 8, and only 226 packages stay visible instead of 11178.
+# Nothing else on the device reports a problem: the mirror is "configured", apk runs, and the
+# failure only shows up at the moment something is actually installed.
+#
+# Conversely repo.huaweicloud.com/openwrt answers 200 with an HTML page for paths that do not
+# exist, so a HEAD probe calls it available. Do not add it on the strength of a 200.
+#
+# Two copies of this file matter, and step 7 mirrors the first into the second:
+#   openwrt/overlay/etc/apk/repositories.d/distfeeds.list  - for images built from this tree
+#                                                             (build-rootfs.sh: cp -a /in/overlay/. $R/)
+#   openwrt/vendor-extra/etc/apk/...                      - for a PREBUILT release install,
+#                                                             which unpacks the vendor tarball
+#                                                             over the system instead
+$feed = @'
+# apk package feeds - pinned to the Tsinghua (TUNA) mirror of downloads.openwrt.org.
+#
+# This file REPLACES the one baked into the rootfs tarball: openwrt/build-rootfs.sh does
+# `cp -a /in/overlay/. $R/` after unpacking the image, so this copy is the one that survives.
+# A device installed from a PREBUILT release never reads openwrt/overlay/, which is why step 7
+# of apply-v50-patches.ps1 mirrors this file into openwrt/vendor-extra/ as well.
+#
+# Measured on the V50 over 4G (2026-10-10), the same 8 indexes, same device, same minute:
+#   downloads.openwrt.org            8/8 reachable, 1.54 MB in 18 s, apk update 7 s
+#   mirrors.tuna.tsinghua.edu.cn     8/8 reachable, 1.54 MB in  8 s, apk update 4 s
+#   mirrors.aliyun.com/openwrt       0/8 reachable (all 404),         apk update FAILS (rc=8)
+# The TUNA copy is byte-identical to the official index (sha256 of
+# packages/aarch64_generic/base/packages.adb matches downloads.openwrt.org exactly), and
+# `apk update` reports the same 11178 packages from either.
+#
+# WHY NOT ALIYUN, since mirrors.aliyun.com/openwrt is the obvious first guess:
+# that mirror's releases/ tree stops at 25.12.0-rc2 and does not carry 25.12.5, the release
+# this image is built from (openwrt/build-rootfs.sh: MU300_WRT_VER defaults to 25.12.5).
+# Every one of the 8 index URLs 404s there, so `apk update` exits 8 and only 226 packages
+# remain visible instead of 11178 - the device looks like it has a working package manager
+# right up until something is actually installed. Verified on the device, not inferred.
+#
+# Other mirrors measured to carry the same 8 indexes with identical bytes (all 8/8, all
+# 20/20 on repeated requests), should TUNA ever be unreachable:
+#   https://mirrors.ustc.edu.cn/openwrt/
+#   https://mirror.sjtu.edu.cn/openwrt/
+#   https://mirror.nju.edu.cn/openwrt/
+#   https://mirrors.bfsu.edu.cn/openwrt/
+#   https://mirrors.cloud.tencent.com/openwrt/
+# Do NOT use https://repo.huaweicloud.com/openwrt/ : it answers 200 with an HTML page for
+# paths that do not exist, so a HEAD probe reports "available" for a feed that is not there.
+#
+# To go back to upstream, replace the host below with https://downloads.openwrt.org - the
+# paths do not change. The kernel version in the kmods path (6.12.94-1-ba5ca7f...) is part
+# of the path and must match the running kernel: an index for another kernel is not a
+# fallback, it is a wrong answer.
+#
+# Contents are comments and 8 URLs; this file is read by apk, not by a shell.
+
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/packages/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/base/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/luci/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/packages/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/routing/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
+'@
+$feedPath = "$Repo\openwrt\overlay\etc\apk\repositories.d\distfeeds.list"
+if ((Test-Path $feedPath) -and ([IO.File]::ReadAllText($feedPath)).Contains('mirrors.tuna.tsinghua.edu.cn')) {
+    Write-Host "  already: apk feed -> mirrors.tuna.tsinghua.edu.cn"
+} else {
+    New-Item -ItemType Directory -Force -Path (Split-Path $feedPath) | Out-Null
+    # LF and no BOM, for the same reason every other file here is: apk reads it, but the encoding
+    # gate below has to be able to tell a clean file from a corrupted one, and this whole tree
+    # ships as a patch that git apply takes byte for byte.
+    [IO.File]::WriteAllText($feedPath, (($feed -replace "`r`n", "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+    Write-Host "  wrote: openwrt/overlay/etc/apk/repositories.d/distfeeds.list"
+    $patched++
+}
+
+# Validate whatever ended up in the file, not just the content this step would have written: a
+# hand-edited feed that silently lost a line still leaves the device without a package manager.
+$feedText = [IO.File]::ReadAllText($feedPath)
+$urls = @($feedText -split "`n" | Where-Object { $_ -match '^\s*https://' })
+$hosts = @($urls | ForEach-Object { ([uri]$_.Trim()).Host } | Sort-Object -Unique)
+if ($urls.Count -ne 8) { throw "apk feed: expected 8 index URLs, found $($urls.Count) in $feedPath" }
+if ($hosts.Count -ne 1) { throw "apk feed: all 8 URLs must share one mirror host, found: $($hosts -join ', ')" }
+if ($hosts[0] -eq 'repo.huaweicloud.com') {
+    throw "apk feed: repo.huaweicloud.com answers 200 with an HTML page for missing paths - it will pass a HEAD probe and still be unusable"
+}
+Write-Host "  ok: 8 index URLs, mirror $($hosts[0])"
+
+Write-Host ""
+Write-Host "=== 17. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so

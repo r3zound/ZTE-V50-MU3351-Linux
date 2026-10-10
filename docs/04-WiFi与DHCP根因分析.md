@@ -66,7 +66,7 @@ BOM 使内核无法解析 shebang，busybox init **静默跳过**该脚本：控
 
 - 去掉两份副本的 BOM，统一 UTF-8 + LF。
 - `tools/apply-v50-patches.ps1` 的 `Patch()` 显式用 `UTF8Encoding($false)` 写出。
-- 新增**第 11 步硬门禁**：扫描所有要上设备的目录
+- 新增**编码门禁（现为第 17 步）**：扫描所有要上设备的目录
   （`openwrt/vendor-extra`、`openwrt/overlay`、`rootfs/overlay`、`boot`），
   出现 UTF-16 / BOM / CRLF 直接 `throw`。独立脚本 `tools/audit-repo-encoding.ps1`。
 

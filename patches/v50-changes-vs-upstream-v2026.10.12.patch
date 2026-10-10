@@ -143,6 +143,59 @@ index 487fd9a..c1a47a8 100755
  jaddr4() { printf '%s' "$1" | sed -n 's/.*"address": *"\([^"]*\)".*/\1/p' | head -n1; }
  jarr_dns() { printf '%s' "$1" | sed -n 's/.*"dns-server": *\[\([^]]*\)\].*/\1/p' | tr -d '"' ; }
  
+diff --git a/openwrt/overlay/etc/apk/repositories.d/distfeeds.list b/openwrt/overlay/etc/apk/repositories.d/distfeeds.list
+new file mode 100644
+index 0000000..797e852
+--- /dev/null
++++ b/openwrt/overlay/etc/apk/repositories.d/distfeeds.list
+@@ -0,0 +1,47 @@
++# apk package feeds - pinned to the Tsinghua (TUNA) mirror of downloads.openwrt.org.
++#
++# This file REPLACES the one baked into the rootfs tarball: openwrt/build-rootfs.sh does
++# `cp -a /in/overlay/. $R/` after unpacking the image, so this copy is the one that survives.
++# A device installed from a PREBUILT release never reads openwrt/overlay/, which is why step 7
++# of apply-v50-patches.ps1 mirrors this file into openwrt/vendor-extra/ as well.
++#
++# Measured on the V50 over 4G (2026-10-10), the same 8 indexes, same device, same minute:
++#   downloads.openwrt.org            8/8 reachable, 1.54 MB in 18 s, apk update 7 s
++#   mirrors.tuna.tsinghua.edu.cn     8/8 reachable, 1.54 MB in  8 s, apk update 4 s
++#   mirrors.aliyun.com/openwrt       0/8 reachable (all 404),         apk update FAILS (rc=8)
++# The TUNA copy is byte-identical to the official index (sha256 of
++# packages/aarch64_generic/base/packages.adb matches downloads.openwrt.org exactly), and
++# `apk update` reports the same 11178 packages from either.
++#
++# WHY NOT ALIYUN, since mirrors.aliyun.com/openwrt is the obvious first guess:
++# that mirror's releases/ tree stops at 25.12.0-rc2 and does not carry 25.12.5, the release
++# this image is built from (openwrt/build-rootfs.sh: MU300_WRT_VER defaults to 25.12.5).
++# Every one of the 8 index URLs 404s there, so `apk update` exits 8 and only 226 packages
++# remain visible instead of 11178 - the device looks like it has a working package manager
++# right up until something is actually installed. Verified on the device, not inferred.
++#
++# Other mirrors measured to carry the same 8 indexes with identical bytes (all 8/8, all
++# 20/20 on repeated requests), should TUNA ever be unreachable:
++#   https://mirrors.ustc.edu.cn/openwrt/
++#   https://mirror.sjtu.edu.cn/openwrt/
++#   https://mirror.nju.edu.cn/openwrt/
++#   https://mirrors.bfsu.edu.cn/openwrt/
++#   https://mirrors.cloud.tencent.com/openwrt/
++# Do NOT use https://repo.huaweicloud.com/openwrt/ : it answers 200 with an HTML page for
++# paths that do not exist, so a HEAD probe reports "available" for a feed that is not there.
++#
++# To go back to upstream, replace the host below with https://downloads.openwrt.org - the
++# paths do not change. The kernel version in the kmods path (6.12.94-1-ba5ca7f...) is part
++# of the path and must match the running kernel: an index for another kernel is not a
++# fallback, it is a wrong answer.
++#
++# Contents are comments and 8 URLs; this file is read by apk, not by a shell.
++
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/packages/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/base/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/luci/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/packages/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/routing/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
 diff --git a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb b/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
 index ad67005..2aeee75 100755
 --- a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
@@ -406,6 +459,59 @@ index 0000000..9cf7134
 +fwlan=$(nft list chain inet fw4 input 2>/dev/null | grep -c "\"${lanif:-br-lan}\" jump")
 +say "br-lan=[$br] ports=[$ports] wlan0=$wst dnsmasq=[$dm] tcp22=$l22 tcp80=$l80 udp67=$l67 fw-jump=$fwlan range=[$rng]"
 \ No newline at end of file
+diff --git a/openwrt/vendor-extra/etc/apk/repositories.d/distfeeds.list b/openwrt/vendor-extra/etc/apk/repositories.d/distfeeds.list
+new file mode 100644
+index 0000000..797e852
+--- /dev/null
++++ b/openwrt/vendor-extra/etc/apk/repositories.d/distfeeds.list
+@@ -0,0 +1,47 @@
++# apk package feeds - pinned to the Tsinghua (TUNA) mirror of downloads.openwrt.org.
++#
++# This file REPLACES the one baked into the rootfs tarball: openwrt/build-rootfs.sh does
++# `cp -a /in/overlay/. $R/` after unpacking the image, so this copy is the one that survives.
++# A device installed from a PREBUILT release never reads openwrt/overlay/, which is why step 7
++# of apply-v50-patches.ps1 mirrors this file into openwrt/vendor-extra/ as well.
++#
++# Measured on the V50 over 4G (2026-10-10), the same 8 indexes, same device, same minute:
++#   downloads.openwrt.org            8/8 reachable, 1.54 MB in 18 s, apk update 7 s
++#   mirrors.tuna.tsinghua.edu.cn     8/8 reachable, 1.54 MB in  8 s, apk update 4 s
++#   mirrors.aliyun.com/openwrt       0/8 reachable (all 404),         apk update FAILS (rc=8)
++# The TUNA copy is byte-identical to the official index (sha256 of
++# packages/aarch64_generic/base/packages.adb matches downloads.openwrt.org exactly), and
++# `apk update` reports the same 11178 packages from either.
++#
++# WHY NOT ALIYUN, since mirrors.aliyun.com/openwrt is the obvious first guess:
++# that mirror's releases/ tree stops at 25.12.0-rc2 and does not carry 25.12.5, the release
++# this image is built from (openwrt/build-rootfs.sh: MU300_WRT_VER defaults to 25.12.5).
++# Every one of the 8 index URLs 404s there, so `apk update` exits 8 and only 226 packages
++# remain visible instead of 11178 - the device looks like it has a working package manager
++# right up until something is actually installed. Verified on the device, not inferred.
++#
++# Other mirrors measured to carry the same 8 indexes with identical bytes (all 8/8, all
++# 20/20 on repeated requests), should TUNA ever be unreachable:
++#   https://mirrors.ustc.edu.cn/openwrt/
++#   https://mirror.sjtu.edu.cn/openwrt/
++#   https://mirror.nju.edu.cn/openwrt/
++#   https://mirrors.bfsu.edu.cn/openwrt/
++#   https://mirrors.cloud.tencent.com/openwrt/
++# Do NOT use https://repo.huaweicloud.com/openwrt/ : it answers 200 with an HTML page for
++# paths that do not exist, so a HEAD probe reports "available" for a feed that is not there.
++#
++# To go back to upstream, replace the host below with https://downloads.openwrt.org - the
++# paths do not change. The kernel version in the kmods path (6.12.94-1-ba5ca7f...) is part
++# of the path and must match the running kernel: an index for another kernel is not a
++# fallback, it is a wrong answer.
++#
++# Contents are comments and 8 URLs; this file is read by apk, not by a shell.
++
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/packages/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/base/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/luci/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/packages/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/routing/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
++https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
 diff --git a/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb b/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb
 new file mode 100644
 index 0000000..2aeee75

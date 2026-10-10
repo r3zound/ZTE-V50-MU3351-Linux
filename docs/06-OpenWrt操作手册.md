@@ -352,7 +352,7 @@ uci set → uci commit → 重启对应服务
 | `tools\mu300.ps1` | SSH 操作封装：执行命令 / 推文件 / 取文件 / 交互 shell |
 | `tools\mu300-api.ps1` | ubus JSON-RPC 客户端 |
 | `tools\mu300-console.ps1` | USB 串口 COM12 读写 |
-| `tools\apply-v50-patches.ps1` | 对上游仓库打全部 12 步补丁（幂等，含编码门禁） |
+| `tools\apply-v50-patches.ps1` | 对上游仓库打全部 17 步补丁（幂等，含编码门禁） |
 | `tools\audit-repo-encoding.ps1` | 扫描 UTF-16 / BOM / CRLF |
 | `tools\collect-v50-logs.ps1` | 取回 `boot_b` 持久化日志（pstore + 48MiB 处），回 Android 后用 |
 | `tools\watch-linux-boot.ps1` | 观察是否已切到 Linux |
@@ -361,7 +361,75 @@ uci set → uci commit → 重启对应服务
 
 ---
 
-## 10. 未验证 / 待办
+## 10. 软件源（apk）
+
+OpenWrt 25.12 起**用 apk，不是 opkg**。设备上没有 `/etc/opkg/`，源在：
+
+```
+/etc/apk/repositories.d/distfeeds.list
+```
+
+本镜像已把它指向 **清华 TUNA** 镜像站。改回官方只需把 8 条 URL 的主机名换成
+`https://downloads.openwrt.org`，路径部分一个字都不用改。
+
+### ⚠️ 阿里云镜像站不能用（2026-10-10 实测）
+
+`https://mirrors.aliyun.com/openwrt/` 是最顺手的国内镜像，但**它没有本镜像用的 25.12.5**：
+它的 `releases/` 目录只同步到 `25.12.0-rc2`。8 条索引 URL 全部 404，`apk update` 直接退出 8，
+可见包从 11178 掉到 226 —— 而设备上**什么异常都不会报**，镜像「配好了」、apk 也能跑，
+要等到真正装东西时才炸。
+
+华为云 `https://repo.huaweicloud.com/openwrt/` 同样不能用，而且更阴：它对不存在的路径
+返回 **200 + 一个 HTML 页面**，所以 `HEAD` 探测会判定「可用」。
+
+### 实测对比（同设备、同 4G 链路、同一次会话）
+
+| 镜像站 | 8 条索引 | 重复请求 | 索引下载 | `apk update` |
+|---|---|---|---|---|
+| `mirrors.aliyun.com/openwrt` | **0/8（404）** | — | — | **rc=8 失败，仅 226 个包** |
+| **`mirrors.tuna.tsinghua.edu.cn/openwrt`** | 8/8 | **20/20** | 1.54 MB / 8 s | **rc=0，4 s，11178 个包** |
+| `mirrors.ustc.edu.cn/openwrt` | 8/8 | 20/20 | 1.54 MB / 8 s | — |
+| `mirror.sjtu.edu.cn/openwrt` | 8/8 | — | 1.54 MB / 8 s | — |
+| `downloads.openwrt.org`（官方） | 8/8 | 20/20 | 1.54 MB / 18 s | rc=0，7 s，11178 个包 |
+
+清华的索引与官方**逐字节相同**
+（`packages/aarch64_generic/base/packages.adb` 的 sha256 完全一致，110251 字节），
+不是改过的内容。
+
+### 闭环验证
+
+不只是「能连上」——在设备上真实装了一个包再卸掉，确认索引签名、下载、校验、安装整条链都通：
+
+```
+apk add bc        -> (1/1) Installing bc (1.08.2-r1)   1 秒
+bc --version      -> bc 1.08.2
+apk del bc        -> (1/1) Purging bc (1.08.2-r1)
+```
+
+装前装后 `apk list --installed` 的 md5 完全一致（`f33281c6816e82bc98703be2c33da2a2`），
+设备回到原状。
+
+### 项目里怎么固化的
+
+源配置要落到**两份**，缺一份就有一类安装方式不生效：
+
+| 路径 | 覆盖哪种安装 |
+|---|---|
+| `openwrt\overlay\etc\apk\repositories.d\distfeeds.list` | 从本仓库源码构建镜像（`build-rootfs.sh` 的 `cp -a /in/overlay/. $R/`） |
+| `openwrt\vendor-extra\etc\apk\repositories.d\distfeeds.list` | 安装**预编译 release**（走 vendor tarball，根本不读 `openwrt\overlay\`） |
+
+由 `tools\apply-v50-patches.ps1` **第 16 步**负责创建 + 第 7 步负责镜像到 vendor-extra，
+第 17 步的编码门禁一并覆盖它。
+
+### 想换别的镜像
+
+清华不可达时，实测同样 8/8、字节一致的中科大 / 上交大 / 南大 / 北科大 / 腾讯云都能用，
+换主机名即可。但**kmods 那条 URL 里的内核版本号（`6.12.94-1-ba5ca7f...`）是路径的一部分**，
+必须和正在跑的内核一致 —— 换个内核版本的索引不是「备选」，是「错的答案」。
+
+---
+
+## 11. 未验证 / 待办
 
 - **BROM 短接 + WPFlasher 刷回**：本文未复测，流程见 `V50\一键刷分区、备份还原工具\` 与 `V50\短接触点.png`；备份在 `backup\2026-10-09-pre-install\`（28 分区 597 MiB，含 `misc.img`）
 - **设备上仍有旧版文件**：`/opt/mu300/bin/mu300-lancheck` 尚未更新到仓库版本。下次整机 `update` 会带上
