@@ -342,6 +342,8 @@ uci set → uci commit → 重启对应服务
 | 安装报 `ALREADY-MOUNTED loop32` | 上次挂载没卸载 | 见 §6 卸载步骤 |
 | 改完配置重启就丢 | 没 `uci commit` | `uci commit <config>` |
 | 装到设备上的脚本不生效 | 文件编码/换行不对 | `tools\audit-repo-encoding.ps1` 扫一遍（UTF-16/BOM/CRLF 都会被指出） |
+| **看板「链路与流量」里 DNS 永远是 `--`** | 后端用逐行 sed 去匹配**跨行**的 JSON 数组；就算不跨行，贪婪的 `.*` 也会咬住 `inactive` 里那个空数组 | 已修（补丁第 15 步，改用 `jsonfilter`）；`dashboard-info` 输出里 `"dns":"218.104.111.122 218.106.127.114"` 即为正常 |
+| 装了 `luci-app-commands` 却找不到菜单 | 它不是顶级菜单，在 **系统 → Custom Commands** | 直接开 `http://192.168.77.1/cgi-bin/luci/admin/system/commands`（子项：Dashboard / Configure） |
 
 ---
 
@@ -352,7 +354,7 @@ uci set → uci commit → 重启对应服务
 | `tools\mu300.ps1` | SSH 操作封装：执行命令 / 推文件 / 取文件 / 交互 shell |
 | `tools\mu300-api.ps1` | ubus JSON-RPC 客户端 |
 | `tools\mu300-console.ps1` | USB 串口 COM12 读写 |
-| `tools\apply-v50-patches.ps1` | 对上游仓库打全部 17 步补丁（幂等，含编码门禁） |
+| `tools\apply-v50-patches.ps1` | 对上游仓库打全部 18 步补丁（幂等，含编码门禁） |
 | `tools\audit-repo-encoding.ps1` | 扫描 UTF-16 / BOM / CRLF |
 | `tools\collect-v50-logs.ps1` | 取回 `boot_b` 持久化日志（pstore + 48MiB 处），回 Android 后用 |
 | `tools\watch-linux-boot.ps1` | 观察是否已切到 Linux |
@@ -418,8 +420,8 @@ apk del bc        -> (1/1) Purging bc (1.08.2-r1)
 | `openwrt\overlay\etc\apk\repositories.d\distfeeds.list` | 从本仓库源码构建镜像（`build-rootfs.sh` 的 `cp -a /in/overlay/. $R/`） |
 | `openwrt\vendor-extra\etc\apk\repositories.d\distfeeds.list` | 安装**预编译 release**（走 vendor tarball，根本不读 `openwrt\overlay\`） |
 
-由 `tools\apply-v50-patches.ps1` **第 16 步**负责创建 + 第 7 步负责镜像到 vendor-extra，
-第 17 步的编码门禁一并覆盖它。
+由 `tools\apply-v50-patches.ps1` **第 17 步**负责创建 + 第 7 步负责镜像到 vendor-extra，
+第 18 步的编码门禁一并覆盖它。
 
 ### 想换别的镜像
 

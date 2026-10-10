@@ -1,8 +1,8 @@
 # Re-apply the V50 port patches to a fresh checkout of dikeckaan/mu300-linux.
 # Run once, after `git clone`, before running install.ps1.
 #
-# Seventeen steps, all idempotent (each one checks for its own marker first): steps 1-15 patch
-# upstream files, 16 writes the apk feed, 17 is an encoding gate over everything that ships.
+# Eighteen steps, all idempotent (each one checks for its own marker first). Steps 1-15 patch
+# upstream files, 17 writes the apk feed, 18 is an encoding gate over everything that ships.
 # The three headline problems each early step fixes are listed here; every step carries its own
 # longer note explaining why the naive fix does not work.
 #
@@ -396,7 +396,10 @@ $mirror = @(
     'etc\apk\repositories.d\distfeeds.list',
     # "dest=source" when the file does not live under openwrt/overlay/: the dashboard backend is a
     # package file (openwrt/luci-app-mu300/root/), so it is named explicitly here.
-    'usr\libexec\unisoc-modem\dashboard-info=openwrt\luci-app-mu300\root\usr\libexec\unisoc-modem\dashboard-info'
+    'usr\libexec\unisoc-modem\dashboard-info=openwrt\luci-app-mu300\root\usr\libexec\unisoc-modem\dashboard-info',
+    # the dashboard page itself. htdocs/ is copied to /www by openwrt/build-rootfs.sh, so a
+    # prebuilt install needs its own copy of it or the page keeps running the unpatched script.
+    'www\luci-static\resources\view\mu300\home.js=openwrt\luci-app-mu300\htdocs\luci-static\resources\view\mu300\home.js'
 )
 $dst = "$Repo\openwrt\vendor-extra"
 foreach ($entry in $mirror) {
@@ -638,7 +641,64 @@ fi
 Patch $dashFile $dashOld $dashNew 'dashboard-info: find the USB gadget netdev by name, not by usb0'
 
 Write-Host ""
-Write-Host "=== 15. display name only: the hostname says V50, nothing functional moves ==="
+Write-Host "=== 15. the dashboard's DNS row: a sed pattern that can never match ==="
+# The status dashboard shows the WAN resolvers on one row (home.js: M.set('dns', w.dns || '--')),
+# and dashboard-info filled that field with a line-oriented sed:
+#
+#   jarr_dns() { printf '%s' "$1" | sed -n 's/.*"dns-server": *\[\([^]]*\)\].*/\1/p' | tr -d '"'; }
+#
+# Two independent reasons that can never produce a value, both confirmed on the V50 where the WAN
+# had two resolvers the whole time and the page said "DNS --":
+#
+#   1. `ubus call network.interface.wan status` pretty-prints over several lines:
+#
+#        "dns-server": [
+#            "218.104.111.122",
+#            "218.106.127.114"
+#        ],
+#
+#      so the `[` and the `]` are on different lines and no single line matches. jval(), right above,
+#      survives this only because the fields it reads ("up", "uptime", "proto", "address") are
+#      scalars that ubus keeps on one line.
+#
+#   2. The leading `.*` is greedy, so even on one line it would settle on the LAST "dns-server" in
+#      the document - the empty array that "inactive" carries, not the real one. jarr_dns was the
+#      only reader in the file with this shape, which is why nothing else broke.
+#
+# jsonfilter is the tool for this and ships with the image (luci-base depends on it, and this
+# script only ever runs behind LuCI). The field stays a plain string: servers space separated, and
+# home.js breaks them onto separate lines the way the address above them is laid out.
+$dashDnsOld = 'jarr_dns() { printf ''%s'' "$1" | sed -n ''s/.*"dns-server": *\[\([^]]*\)\].*/\1/p'' | tr -d ''"'' ; }'
+$dashDnsNew = @'
+# jsonfilter, not sed. Two independent reasons, both live on this device (V50, 2026-10-10):
+#   * `ubus call ... status` pretty-prints across several lines, so `"dns-server": [ ... ]` never
+#     matches inside ONE line and a line-oriented sed finds nothing at all - jarr_dns returned
+#     the empty string and the dashboard said "DNS --";
+#   * the leading `.*` in such a pattern is greedy, so even on a single line it would settle on
+#     the EMPTY "dns-server" array that "inactive" carries: the last one in the document, not the
+#     real one.
+# The interface had two servers configured the whole time. The field is a plain string here, so
+# the servers are space separated and home.js breaks them onto separate lines.
+jarr_dns() { t3 jsonfilter -s "$1" -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ' | sed 's/  *$//'; }
+'@
+$dashDnsNew = $dashDnsNew.TrimEnd("`n") -replace "`r`n", "`n"
+Patch $dashFile $dashDnsOld $dashDnsNew 'dashboard-info: read dns-server with jsonfilter'
+
+# ...and the page has to be able to show more than one of them. M.set() assigns textContent, so the
+# servers arrive as one line unless the row is filled the same way as the address above it.
+$homeFile = "$Repo\openwrt\luci-app-mu300\htdocs\luci-static\resources\view\mu300\home.js"
+$homeDnsOld = "`t`tM.set('dns', w.dns || '--');"
+$homeDnsNew = (@'
+		/* one resolver per line, laid out like the address above it. M.set() writes textContent and
+		   cannot do that, and the backend sends the servers space separated (see jarr_dns). */
+		var dnsList = (w.dns ? String(w.dns).split(/\s+/) : []).filter(function(s) { return s; });
+		var dnsEl = M.v('dns');
+		if (dnsEl) dnsEl.innerHTML = dnsList.length ? dnsList.map(M.esc).join('<br>') : '--';
+'@).TrimEnd("`n") -replace "`r`n", "`n"
+Patch $homeFile $homeDnsOld $homeDnsNew 'home.js: one resolver per line'
+
+Write-Host ""
+Write-Host "=== 16. display name only: the hostname says V50, nothing functional moves ==="
 # LAYER 3 of the V50 identity work, and deliberately the ONLY thing renamed anywhere.
 #
 # The question this settles: should the whole project be re-badged from MU300/F50 to V50/MU3351?
@@ -672,7 +732,7 @@ $hostNew = "set system.@system[0].hostname='V50'"
 Patch "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300" $hostOld $hostNew '90-mu300: hostname V50 (display only)'
 
 Write-Host ""
-Write-Host "=== 16. point apk at a mirror that actually carries this release ==="
+Write-Host "=== 17. point apk at a mirror that actually carries this release ==="
 # OpenWrt 25.12 uses apk, and /etc/apk/repositories.d/distfeeds.list ships pointing at
 # downloads.openwrt.org. This device reaches the internet over 4G, where that host is slow -
 # measured here: the same 8 indexes take 18 s against upstream and 8 s against the Tsinghua
@@ -769,7 +829,7 @@ if ($hosts[0] -eq 'repo.huaweicloud.com') {
 Write-Host "  ok: 8 index URLs, mirror $($hosts[0])"
 
 Write-Host ""
-Write-Host "=== 17. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
+Write-Host "=== 18. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # Everything in openwrt/vendor-extra/ is unpacked straight onto the running system's / and executed there,
 # and openwrt/overlay/ is unpacked the same way by openwrt/build-rootfs.sh. A file in either tree that is not
 # plain UTF-8 with LF endings fails in the worst possible way: the kernel cannot read the shebang, so
@@ -781,7 +841,7 @@ Write-Host "=== 17. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 # wlan0 never existed, and lancheck dutifully recorded "wlan0=" empty while dropbear answered on port 22.
 # Fail here, where the file can still be fixed, instead of on the device.
 $bad = @()
-foreach ($tree in @("$Repo\openwrt\vendor-extra", "$Repo\openwrt\overlay", "$Repo\rootfs\overlay", "$Repo\boot")) {
+foreach ($tree in @("$Repo\openwrt\vendor-extra", "$Repo\openwrt\overlay", "$Repo\openwrt\luci-app-mu300", "$Repo\rootfs\overlay", "$Repo\boot")) {
     if (-not (Test-Path $tree)) { continue }
     Get-ChildItem -Recurse -File -Path "$tree\*" | Where-Object {
         $_.Length -gt 3 -and $_.Length -lt 2MB -and $_.Extension -notmatch '^\.(ko|img|bin|png|jpg|jpeg|gz|xz|bz2|zip|tar|so|elf|o|pyc|woff2?|ttf|pdf|deb)$'

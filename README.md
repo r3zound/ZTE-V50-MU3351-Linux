@@ -8,7 +8,7 @@
 |---|---|
 | 目标设备 | ZTE V50（`MU3351`，板型 `ums9620_2h10_feimao`） |
 | 上游项目 | [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)（MIT） |
-| 验证版本 | 上游 **v2026.10.12** + 本仓库 17 步补丁 |
+| 验证版本 | 上游 **v2026.10.12** + 本仓库 18 步补丁 |
 | 系统 | Android 13 + OpenWrt 25.12.5（`openwrt-luci` 面板版） |
 | 内核 | 5.4.254（vendor 基线） |
 | 风险 | 低。不动 `boot_a` / GPT / `userdata`；只写 Linux 区、`boot_b`、`misc` 的 32 字节 |
@@ -64,7 +64,7 @@ $R   = '<本仓库克隆到某处>'          # 例：D:\V50
 # 1) 取上游源码（版本要匹配，见 3.1）
 git clone https://github.com/dikeckaan/mu300-linux "$R\mu300-linux"
 
-# 2) 打补丁（17 步，幂等，可重复跑）
+# 2) 打补丁（18 步，幂等，可重复跑）
 & "$R\tools\apply-v50-patches.ps1" -Repo "$R\mu300-linux"
 
 # 3) 只读检查
@@ -110,7 +110,7 @@ INSTALL  最终确认（必须是大写 INSTALL）
 
 ## 4. 必须打的补丁，以及不打会怎样
 
-上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 17 步：
+上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 18 步：
 
 | 步 | 修什么 | 不打会怎样 |
 |---|---|---|
@@ -129,11 +129,31 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 12 | **关掉 flow offload**（`accept_to_wan` 为空 + `fw4 reload` 被 `Resource busy` 挡住） | **转发的 TCP 全被 RST**：客户端能解析域名却打不开任何网页，像「没有 DNS」 |
 | 13 | **修正 `board.json` 里的 `eth0`**（改成实际的 `br-lan`） | LuCI 端口状态永远显示一个**不存在的 `eth0` 未连接**（armsr 基础镜像的残留） |
 | 14 | **状态看板的 USB 指示器按实际网卡名取数**（`usb0` 或 `rndis0`） | 看板的「USB 网络」永远显示**未连接**，哪怕链路正通（RNDIS 模式下网卡叫 `rndis0`） |
-| 15 | **主机名改成 `V50`**（纯展示层） | shell 提示符与页面标题仍写着上一台设备的 `mu300` |
-| 16 | **apk 软件源指向清华 TUNA 镜像** | 4G 下官方源慢 2.25 倍；换成阿里云则**根本装不了包**（见 §4.2） |
-| 17 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
+| 15 | **状态看板的 DNS 改用 `jsonfilter` 解析** | 原来的 sed 模式**永远匹配不上**，`DNS` 一栏永远是 `--`，哪怕 WAN 上配着两个 DNS |
+| 16 | **主机名改成 `V50`**（纯展示层） | shell 提示符与页面标题仍写着上一台设备的 `mu300` |
+| 17 | **apk 软件源指向清华 TUNA 镜像** | 4G 下官方源慢 2.25 倍；换成阿里云则**根本装不了包**（见 §4.3） |
+| 18 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
 
-### 4.1 为什么第 6/7 步是必需的
+### 4.1 第 15 步：为什么 DNS 那一栏永远是 `--`
+
+看板的 DNS 读 `wan.dns`，后端 `dashboard-info` 原来这样取：
+
+```sh
+jarr_dns() { printf '%s' "$1" | sed -n 's/.*"dns-server": *\[\([^]]*\)\].*/\1/p' | tr -d '"' ; }
+```
+
+两个各自独立、且都成立的原因，任一个都足以让它取不到值：
+
+1. `ubus call network.interface.wan status` 是**多行漂亮打印**的，`[` 和 `]` 不在同一行，
+   逐行的 sed 一行都匹配不到。旁边的 `jval()` 逃过一劫，纯粹因为它读的
+   `up` / `uptime` / `proto` / `address` 都是标量，ubus 不会拆行。
+2. 这种模式开头的 `.*` 是**贪婪**的，就算压成一行，它也会咬住文档里**最后**一个
+   `dns-server` —— 也就是 `inactive` 块里那个**空数组**，而不是真的那个。
+
+这台设备上 WAN 一直配着两个 DNS，页面一直显示 `--`。改用 `jsonfilter` 后两个都正常显示
+（每个一行）。
+
+### 4.2 为什么第 6/7 步是必需的
 
 `install.ps1` 装的是**预编译 release 的 rootfs**，`openwrt/overlay/` 只在
 `openwrt/build-rootfs.sh` 从源码构建时才被读取 —— 所以只改 overlay 树，
@@ -149,9 +169,9 @@ INSTALL  最终确认（必须是大写 INSTALL）
   显式写 **0755**。验证：`tar -tvzf mu300-vendor-openwrt-luci.tar.gz` 应显示 `-rwxr-xr-x`。
 - **编码**：`openwrt/overlay/etc/init.d/mu300-hw` 在上游仓库里是 **UTF-16LE**。
   写成 UTF-16 或带 BOM 的文件在设备上**跑不起来，而且内核是静默跳过**——控制台没有任何报错。
-  所以补丁脚本第 17 步会扫描所有要发到设备的目录，发现 UTF-16/BOM/CRLF 直接中止。
+  所以补丁脚本第 18 步会扫描所有要发到设备的目录，发现 UTF-16/BOM/CRLF 直接中止。
 
-### 4.2 为什么软件源不能用阿里云
+### 4.3 为什么软件源不能用阿里云
 
 OpenWrt 25.12 用 **apk**（不是 opkg），源文件是 `/etc/apk/repositories.d/distfeeds.list`。
 本仓库把它指向 **清华 TUNA**，并在设备上实测过：
@@ -310,7 +330,7 @@ docs/
   05-一键复刻指南.md         分阶段清单式复刻步骤 + 验收清单
   06-OpenWrt操作手册.md      刷完后的日常操作（各通道、坑、能力清单）
 tools/
-  apply-v50-patches.ps1     17 步补丁（幂等，含编码门禁）★核心
+  apply-v50-patches.ps1     18 步补丁（幂等，含编码门禁）★核心
   backup-v50-partitions.ps1 28 分区备份 + sha256 校验
   audit-repo-encoding.ps1   扫 UTF-16 / BOM / CRLF
   collect-v50-logs.ps1      回 Android 后取 Linux 的持久化日志
@@ -362,8 +382,10 @@ probe/
 | WiFi 连 ping 都不通，USB 口却正常 | 两条重复路由 | 5.3 |
 | 切不进 Linux，报「not Linux」 | boot 镜像命令行被改过 | 第 4 节补丁第 2/2b 步 |
 | 设备再也回不了 Android（断电也没用） | 无条件 re-arm 把两个回退计数器都清了 | 第 4 节补丁第 4 步 |
-| **`apk add` 装不上，或 `apk update` 退出码 8** | 镜像站没有本镜像用的 25.12.5（阿里云就是这样） | 第 4 节 §4.2 |
-| 改了 `openwrt/overlay/` 却毫无效果 | 预编译安装只认 vendor-extra 通道 | 4.1 |
+| **`apk add` 装不上，或 `apk update` 退出码 8** | 镜像站没有本镜像用的 25.12.5（阿里云就是这样） | 第 4 节 §4.3 |
+| **看板「链路与流量」里 DNS 永远是 `--`** | 后端用逐行 sed 取多行 JSON 的数组，匹配不上 | 第 4 节 §4.1（补丁第 15 步） |
+| 装了 `luci-app-commands` 却找不到菜单 | 它在 **系统 → Custom Commands**，不是顶级菜单 | `/cgi-bin/luci/admin/system/commands` |
+| 改了 `openwrt/overlay/` 却毫无效果 | 预编译安装只认 vendor-extra 通道 | 4.2 |
 | 装上去的脚本不执行 | 编码问题 | `tools\audit-repo-encoding.ps1` |
 | 安装报 `ALREADY-MOUNTED loop32` | 上次挂载没卸载 | 06 手册第 6 节 |
 
