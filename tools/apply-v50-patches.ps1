@@ -1002,7 +1002,7 @@ $ledChecks = @(
     @{ File = "$ledTree\mu300-led";      Have = @('"flash "*)', '"data on")', 'render() {', 'aw_mask()', 'aw_write()', 'aw_panel()', 'modprobe i2c-dev');                     Want = 'the scheme itself: render(), the flash branch, and the AW9523B i2c backend' },
     @{ File = "$ledTree\mu300-buttons";  Have = @('mu300-led flash', 'mu300-led alarm on');                    Want = 'the V50 key: a flash on the press, the siren on the hold' },
     @{ File = "$ledTree\mu300-wifi-band"; Have = @('mu300-led" wifi sync');                                    Want = 'a band switch telling the LED which band it is' },
-    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50', 'LED_BACKEND=i2c', 'LED_I2C_BUS=', 'LED_I2C_ADDR=', 'LED_I2C_GCR=', 'LED_AW_RED=', 'LED_AW_GREEN=', 'LED_AW_BLUE=', 'NO_NET_CHANNEL=aw:red', 'NET5_CHANNEL=aw:white', 'NET24_CHANNEL=aw:blue');                  Want = 'the v50 scheme on the AW9523B: backend, bus, and the three colour masks' },
+    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50', 'LED_BACKEND=i2c', 'LED_I2C_BUS=', 'LED_I2C_ADDR=', 'LED_I2C_GCR=', 'LED_AW_RED=', 'LED_AW_GREEN=', 'LED_AW_BLUE=', 'LED_AW_WHITE_LEVEL=', 'NO_NET_CHANNEL=aw:red', 'NET5_CHANNEL=aw:white', 'NET24_CHANNEL=aw:blue');                  Want = 'the v50 scheme on the AW9523B: backend, bus, the three colour masks and white''s own level' },
     @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()', 'mu300-led data on');  Want = 'one key reader, and the panel drawn once per boot' }
 )
 $ledBad = @()

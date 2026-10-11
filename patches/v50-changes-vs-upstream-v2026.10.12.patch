@@ -400,7 +400,7 @@ index 5624030..9f60a82 100755
  	procd_close_instance
  }
 diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
-index 2aab62b..4d854eb 100755
+index 2aab62b..63623f5 100755
 --- a/openwrt/overlay/etc/uci-defaults/90-mu300
 +++ b/openwrt/overlay/etc/uci-defaults/90-mu300
 @@ -36,9 +36,15 @@ if [ "$run" = first ]; then
@@ -485,7 +485,7 @@ index 2aab62b..4d854eb 100755
  	[ ! -e /usr/lib/lua/luci/i18n/base.zh-cn.lmo ] || uci -q get luci.languages.zh_cn >/dev/null ||
  		uci -q set luci.languages.zh_cn="$(printf '\347\256\200\344\275\223\344\270\255\346\226\207 (Simplified Chinese)')"
  	uci commit luci
-@@ -123,6 +160,37 @@ set luci.mu300.lang='1'
+@@ -123,6 +160,42 @@ set luci.mu300.lang='1'
  UCI
  	uci commit luci
  fi
@@ -500,7 +500,11 @@ index 2aab62b..4d854eb 100755
 +# masks are the vendor device tree's own aw9523b,idx lists, turned into one bit per dimming register 0x20-0x2F -
 +# those registers are not in pin order (8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a colour is a mask, not a range.
 +# They add up to 0xffff, every register is claimed once and no two colours overlap. "white" is all three at once and
-+# needs no line of its own. LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
++# needs no line of its own, but it does need a level of its own: three emitters reading at the same current look
++# about three times as bright as one, and LED_AW_WHITE_LEVEL is what brings white back level with red and blue
++# while keeping it white. Walked down on the panel from 100% (glaring) through 80/65/50/40/32/20 to 10, which is a
++# calm night-time white that still reads as white rather than as grey. Raise it if the panel is in a bright room.
++# LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
 +if [ ! -e /etc/mu300/led.conf ]; then
 +	mkdir -p /etc/mu300
 +	cat > /etc/mu300/led.conf <<'LEDCONF'
@@ -513,6 +517,7 @@ index 2aab62b..4d854eb 100755
 +LED_AW_RED=0x2894
 +LED_AW_GREEN=0x4329
 +LED_AW_BLUE=0x9442
++LED_AW_WHITE_LEVEL=10
 +NO_NET_CHANNEL=aw:red
 +NET5_CHANNEL=aw:white
 +NET24_CHANNEL=aw:blue
@@ -949,10 +954,10 @@ index 0000000..9f60a82
 +}
 diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
 new file mode 100644
-index 0000000..4d854eb
+index 0000000..63623f5
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,214 @@
 +#!/bin/sh
 +# The MU300's OpenWrt settings: what the system needs on every run, and first-install defaults once.
 +#
@@ -1126,7 +1131,11 @@ index 0000000..4d854eb
 +# masks are the vendor device tree's own aw9523b,idx lists, turned into one bit per dimming register 0x20-0x2F -
 +# those registers are not in pin order (8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a colour is a mask, not a range.
 +# They add up to 0xffff, every register is claimed once and no two colours overlap. "white" is all three at once and
-+# needs no line of its own. LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
++# needs no line of its own, but it does need a level of its own: three emitters reading at the same current look
++# about three times as bright as one, and LED_AW_WHITE_LEVEL is what brings white back level with red and blue
++# while keeping it white. Walked down on the panel from 100% (glaring) through 80/65/50/40/32/20 to 10, which is a
++# calm night-time white that still reads as white rather than as grey. Raise it if the panel is in a bright room.
++# LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
 +if [ ! -e /etc/mu300/led.conf ]; then
 +	mkdir -p /etc/mu300
 +	cat > /etc/mu300/led.conf <<'LEDCONF'
@@ -1139,6 +1148,7 @@ index 0000000..4d854eb
 +LED_AW_RED=0x2894
 +LED_AW_GREEN=0x4329
 +LED_AW_BLUE=0x9442
++LED_AW_WHITE_LEVEL=10
 +NO_NET_CHANNEL=aw:red
 +NET5_CHANNEL=aw:white
 +NET24_CHANNEL=aw:blue
@@ -1411,10 +1421,10 @@ index 0000000..ea2cc58
 \ No newline at end of file
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-led b/openwrt/vendor-extra/opt/mu300/bin/mu300-led
 new file mode 100644
-index 0000000..3c3db1f
+index 0000000..a1252ea
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-led
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,385 @@
 +#!/bin/sh
 +# The device's LEDs by what they mean, so the services need not know which device they run on.
 +#   mu300-led power on|off      Linux is up (set at boot, which also wakes the LEDs; cleared at shutdown)
@@ -1469,9 +1479,10 @@ index 0000000..3c3db1f
 +# The v50 scheme, all in the same file: LED_SCHEME=classic (the default, every device that is not a V50) or v50;
 +# NO_NET_CHANNEL / NET5_CHANNEL / NET24_CHANNEL (which channel each of the three colours is on); KEY_FLASH_COUNT
 +# (flash, default 2); LED_LEVEL (per cent of max_brightness, to turn a channel down without changing the file).
-+# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR and the three colour
-+# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F). "white" is not a mask
-+# of its own - it is all three, which is why it needs no entry.
++# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR, the three colour
++# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F) and
++# LED_AW_WHITE_LEVEL. "white" is not a mask of its own - it is all three, which is why it needs no entry, and why
++# it needs its own percentage: three emitters at once read about three times as bright as one.
 +# Every write is best effort: the PMIC rejects a brightness write now and then (mobile-data), and a cosmetic
 +# LED must never make a service fail.
 +# (MU300_SYSROOT, MU300_BIN and MU300_LED_CONF are for tests/: a fake /, this directory, a led.conf)
@@ -1518,6 +1529,8 @@ index 0000000..3c3db1f
 +LED_BACKEND=$(conf LED_BACKEND)
 +AW_BUS=$(conf LED_I2C_BUS); AW_ADDR=$(conf LED_I2C_ADDR); AW_GCR=$(conf LED_I2C_GCR)
 +AW_RED=$(conf LED_AW_RED); AW_GREEN=$(conf LED_AW_GREEN); AW_BLUE=$(conf LED_AW_BLUE)
++AW_WHITE_LEVEL=$(conf LED_AW_WHITE_LEVEL)
++case $AW_WHITE_LEVEL in ''|*[!0-9]*) AW_WHITE_LEVEL=100 ;; esac
 +aw_panel() { [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ -e "$R/dev/i2c-$AW_BUS" ]; }
 +# i2c_dev is a module here and nothing else on the system asks for it - it loads with a zero refcount and stays
 +# that way. Without /dev/i2c-N the scheme would have no way to reach the chip and the panel would simply stay dark,
@@ -1573,9 +1586,17 @@ index 0000000..3c3db1f
 +aw_write() {  # aw_write NAME LEVEL: repaint the whole panel with one I2C block write
 +    _m=$(aw_mask "$1") || return 0
 +    case $_m in ''|*[!0-9a-fA-Fx]*) return 0 ;; esac
++    _v=$2
++    # White is not a fourth colour, it is all three at once, so the light adds up. Each LED still carries only its
++    # own channel's current - the red beads take exactly as much showing white as showing red - but the eye sees
++    # three emitters instead of one, and at the same DIM white reads about three times as bright as a single
++    # colour. Scaling white's own DIM is the only knob that helps, and it scales all three together: white can be
++    # brought level with a single colour but never exactly equal to it. Chosen by eye on this panel, 2026-10-11:
++    # 50% sits level with blue and still reads as white.
++    case $1 in aw:white) _v=$(( _v * AW_WHITE_LEVEL / 100 )) ;; esac
 +    _b=
 +    for _i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-+        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $2"; else _b="$_b 0"; fi
++        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $_v"; else _b="$_b 0"; fi
 +    done
 +    # GCR first: it sets the current range, and it must not be lost across a repaint. Best effort throughout, as
 +    # everywhere else here - a cosmetic LED must never make a service fail.
@@ -2847,7 +2868,7 @@ index 1a99ba9..ec0d405 100755
      esac
  done; wait; }
 diff --git a/rootfs/overlay/opt/mu300/bin/mu300-led b/rootfs/overlay/opt/mu300/bin/mu300-led
-index 86c9801..3c3db1f 100755
+index 86c9801..a1252ea 100755
 --- a/rootfs/overlay/opt/mu300/bin/mu300-led
 +++ b/rootfs/overlay/opt/mu300/bin/mu300-led
 @@ -5,6 +5,8 @@
@@ -2859,7 +2880,7 @@ index 86c9801..3c3db1f 100755
  #   mu300-led wake              show the LEDs again, for LED_TIMEOUT seconds (every key press, mu300-buttons); also
  #                               in mu300-power's idle, for LED_TIMEOUT (60 s when it is 0): a key always shows life
  #   mu300-led sleep [--if-due]  dark now (--if-due: only once the timeout has passed; mu300-buttons asks)
-@@ -21,14 +23,38 @@
+@@ -21,14 +23,39 @@
  #   network  as ZTE's firmware: blue on 4G (a GPIO, net_blue), white on 5G (LDO VDDCAMA0), red without service
  #            (the PMIC's keypad backlight sink, "keyboard-backlight" under 5.4 and mainline)
  #   Wi-Fi    white: LDO VDDCAMA1 (2.4 GHz); blue: LDO VDDCAMA2 (5 GHz)
@@ -2892,13 +2913,14 @@ index 86c9801..3c3db1f 100755
 +# The v50 scheme, all in the same file: LED_SCHEME=classic (the default, every device that is not a V50) or v50;
 +# NO_NET_CHANNEL / NET5_CHANNEL / NET24_CHANNEL (which channel each of the three colours is on); KEY_FLASH_COUNT
 +# (flash, default 2); LED_LEVEL (per cent of max_brightness, to turn a channel down without changing the file).
-+# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR and the three colour
-+# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F). "white" is not a mask
-+# of its own - it is all three, which is why it needs no entry.
++# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR, the three colour
++# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F) and
++# LED_AW_WHITE_LEVEL. "white" is not a mask of its own - it is all three, which is why it needs no entry, and why
++# it needs its own percentage: three emitters at once read about three times as bright as one.
  # Every write is best effort: the PMIC rejects a brightness write now and then (mobile-data), and a cosmetic
  # LED must never make a service fail.
  # (MU300_SYSROOT, MU300_BIN and MU300_LED_CONF are for tests/: a fake /, this directory, a led.conf)
-@@ -47,9 +73,46 @@ esac
+@@ -47,9 +74,48 @@ esac
  # outshines the others when mixed
  SIREN="sc27xx:red sc27xx:green sc27xx:blue"
  SIREN_PID=$R/run/mu300/led-siren.pid
@@ -2931,6 +2953,8 @@ index 86c9801..3c3db1f 100755
 +LED_BACKEND=$(conf LED_BACKEND)
 +AW_BUS=$(conf LED_I2C_BUS); AW_ADDR=$(conf LED_I2C_ADDR); AW_GCR=$(conf LED_I2C_GCR)
 +AW_RED=$(conf LED_AW_RED); AW_GREEN=$(conf LED_AW_GREEN); AW_BLUE=$(conf LED_AW_BLUE)
++AW_WHITE_LEVEL=$(conf LED_AW_WHITE_LEVEL)
++case $AW_WHITE_LEVEL in ''|*[!0-9]*) AW_WHITE_LEVEL=100 ;; esac
 +aw_panel() { [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ -e "$R/dev/i2c-$AW_BUS" ]; }
 +# i2c_dev is a module here and nothing else on the system asks for it - it loads with a zero refcount and stays
 +# that way. Without /dev/i2c-N the scheme would have no way to reach the chip and the panel would simply stay dark,
@@ -2946,7 +2970,7 @@ index 86c9801..3c3db1f 100755
  uptime_s() { cut -d. -f1 "$R/proc/uptime" 2>/dev/null || echo 0; }
  before() {  # before FILE: the uptime in FILE has not come yet
      until=$(cat "$1" 2>/dev/null) || return 1
-@@ -66,20 +129,74 @@ idle() { [ -e "$STATE/.idle" ]; }   # mu300-power's idle: dark, whatever the tim
+@@ -66,20 +132,82 @@ idle() { [ -e "$STATE/.idle" ]; }   # mu300-power's idle: dark, whatever the tim
  # Lit now? Awake as usual; in idle only for a key's wake (.peek-until). The incident of 2026-10-07: idle on, and every
  # key press was swallowed by it - a device dark for hours that looked powered off. A key must always show life.
  shown() { if idle; then before "$STATE/.peek-until"; else awake; fi; }
@@ -2979,9 +3003,17 @@ index 86c9801..3c3db1f 100755
 +aw_write() {  # aw_write NAME LEVEL: repaint the whole panel with one I2C block write
 +    _m=$(aw_mask "$1") || return 0
 +    case $_m in ''|*[!0-9a-fA-Fx]*) return 0 ;; esac
++    _v=$2
++    # White is not a fourth colour, it is all three at once, so the light adds up. Each LED still carries only its
++    # own channel's current - the red beads take exactly as much showing white as showing red - but the eye sees
++    # three emitters instead of one, and at the same DIM white reads about three times as bright as a single
++    # colour. Scaling white's own DIM is the only knob that helps, and it scales all three together: white can be
++    # brought level with a single colour but never exactly equal to it. Chosen by eye on this panel, 2026-10-11:
++    # 50% sits level with blue and still reads as white.
++    case $1 in aw:white) _v=$(( _v * AW_WHITE_LEVEL / 100 )) ;; esac
 +    _b=
 +    for _i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-+        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $2"; else _b="$_b 0"; fi
++        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $_v"; else _b="$_b 0"; fi
 +    done
 +    # GCR first: it sets the current range, and it must not be lost across a repaint. Best effort throughout, as
 +    # everywhere else here - a cosmetic LED must never make a service fail.
@@ -3024,7 +3056,7 @@ index 86c9801..3c3db1f 100755
      mkdir -p "$STATE" 2>/dev/null && echo "$2" > "$STATE/$1" 2>/dev/null
      if [ "$2" = 1 ] && ! shown; then write "$1" 0; else write "$1" "$2"; fi
  }
-@@ -88,6 +205,34 @@ wifi_band() {  # 5 or 2.4: the channel the hotspot runs on, else (it has none ye
+@@ -88,6 +216,34 @@ wifi_band() {  # 5 or 2.4: the channel the hotspot runs on, else (it has none ye
      if [ -n "$ch" ]; then [ "$ch" -gt 14 ] && echo 5 || echo 2.4
      else "${MU300_BIN:-/opt/mu300/bin}/mu300-wifi-band" 2>/dev/null | sed -n 's/^hotspot: \([0-9.]*\) GHz$/\1/p'; fi
  }
@@ -3059,7 +3091,7 @@ index 86c9801..3c3db1f 100755
  show_all() {  # every LED as it should be (none while idle, unless a key woke them)
      shown || return 0
      for f in "$STATE"/*; do
-@@ -96,20 +241,30 @@ show_all() {  # every LED as it should be (none while idle, unless a key woke th
+@@ -96,20 +252,30 @@ show_all() {  # every LED as it should be (none while idle, unless a key woke th
      done
  }
  siren_running() { p=$(cat "$SIREN_PID" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
@@ -3097,7 +3129,7 @@ index 86c9801..3c3db1f 100755
      "wifi sync")  # a running AP has its SSID in iw's answer; a stopped hostapd leaves "type AP" without one
          # (a hotspot that LuCI turned on can take longer than any one moment to come up: S follows it a while)
          n=${3:-0} last=
-@@ -129,7 +284,8 @@ case "$1 ${2:-}" in
+@@ -129,7 +295,8 @@ case "$1 ${2:-}" in
              echo $((now + t)) > "$STATE/.peek-until"
          fi
          [ "$TIMEOUT" = 0 ] || echo $((now + TIMEOUT)) > "$STATE/.awake-until"
@@ -3107,7 +3139,7 @@ index 86c9801..3c3db1f 100755
      "sleep "*)
          if idle; then   # a key's wake in idle: dark again once it is over
              if [ "${2:-}" = --if-due ] && shown; then exit 0; fi
-@@ -150,7 +306,7 @@ case "$1 ${2:-}" in
+@@ -150,7 +317,7 @@ case "$1 ${2:-}" in
          [ -z "$POWER" ] || write "$POWER" 0 ;;
      "idle off")
          rm -f "$STATE/.idle" "$STATE/.peek-until"
@@ -3116,7 +3148,7 @@ index 86c9801..3c3db1f 100755
      "charge on")
          [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
          echo timer > "$LEDS/$POWER/trigger" 2>/dev/null
-@@ -160,7 +316,7 @@ case "$1 ${2:-}" in
+@@ -160,7 +327,7 @@ case "$1 ${2:-}" in
          [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
          echo none > "$LEDS/$POWER/trigger" 2>/dev/null
          write "$POWER" 0
@@ -3125,7 +3157,7 @@ index 86c9801..3c3db1f 100755
      "alarm on")
          siren_running && exit 0
          mkdir -p "${SIREN_PID%/*}" 2>/dev/null
-@@ -172,7 +328,7 @@ case "$1 ${2:-}" in
+@@ -172,7 +339,7 @@ case "$1 ${2:-}" in
          rm -f "$SIREN_PID"
          nap 0.2
          for l in $SIREN; do write "$l" 0; done
@@ -3134,7 +3166,7 @@ index 86c9801..3c3db1f 100755
      "siren "*)   # (alarm on runs this in the background)
          # Only the siren named in the pid file runs: one left behind (its alarm switched off while it was
          # between writes, a restarted service) stops by itself instead of flashing along with the new one.
-@@ -184,10 +340,28 @@ case "$1 ${2:-}" in
+@@ -184,10 +351,28 @@ case "$1 ${2:-}" in
              elif [ $n -gt 0 ]; then exit 0; fi
              n=$((n + 1))
              for on in $SIREN; do
@@ -3164,7 +3196,7 @@ index 86c9801..3c3db1f 100755
      "test "*)
          for l in "$LEDS"/*; do
              n=${l##*/}
-@@ -195,6 +369,6 @@ case "$1 ${2:-}" in
+@@ -195,6 +380,6 @@ case "$1 ${2:-}" in
              old=$(cat "$l/brightness" 2>/dev/null)
              echo "$n"; write "$n" 1; sleep 2; echo "${old:-0}" > "$l/brightness" 2>/dev/null
          done ;;
