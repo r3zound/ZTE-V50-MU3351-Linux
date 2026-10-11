@@ -15,7 +15,7 @@ $bad = @()
 foreach ($r in $roots) {
     $p = Join-Path $Repo $r
     if (-not (Test-Path $p)) { continue }
-    Get-ChildItem -Recurse -File -Path "$p\*" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem -Recurse -File -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
         if ($seen.ContainsKey($_.FullName)) { return }
         $seen[$_.FullName] = $true
         if ($_.Extension -match $skipExt) { return }

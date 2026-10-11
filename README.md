@@ -23,7 +23,7 @@
 | **USB 网络可选** | 切成 RNDIS 后 PC 出现网卡并拿到 LAN 地址，USB 也能上网 |
 | 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。链路经实测确为 **USB 3.0 SuperSpeed**（`bcdUSB 0x0320` / `current_speed=super-speed`），但单条 TCP 流只能拿到 300–400 Mbps，想跑满要**多流并发**。测法与「一种会被 `nc` 循环伪装成"不扩展"的错测法」见 `docs/06-OpenWrt操作手册.md` 附录 |
 | **实体按键** | 短按：热点 **2.4GHz ↔ 5GHz**（闪 2 下确认）；按住 **10 秒**：重启设备，三色轮流闪到下电（V50 的键报 KEY_FN=464，上游只认 116/138，故原先无反应。见 §4.6） |
-| **指示灯** | **无外网=红 / 有网+5GHz=白 / 有网+2.4GHz=蓝**（单通道纯色）。切频段后自动跟随。F50/U30 Air 的原灯语不受影响，可配。见 §4.7 |
+| **指示灯** | **无外网=红 / 有网+5GHz=白 / 有网+2.4GHz=蓝**。面板彩灯是 I2C 上的 AW9523B，由 mu300-led 用户态直控（不是 sysfs 里的 sc27xx:*，那是背光）。切频段后自动跟随。F50/U30 Air 的原灯语不受影响，可配。见 §4.7 |
 | **无线国家码** | 默认 `US`：2.4GHz 允许 **30 dBm**（BO/CN 只有 20），且允许低段 5GHz 起 AP |
 | 管理 | `ssh root@192.168.77.1`；LuCI `http://192.168.77.1/cgi-bin/luci/` |
 | 一键切换 | 在 Android 侧一条命令进 OpenWrt；在 OpenWrt 里重启即回 Android |
@@ -269,41 +269,52 @@ HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && 
 
 ### 4.7 指示灯：无外网=红，有网+5GHz=白，有网+2.4GHz=蓝
 
-V50 的那颗 RGB 指示灯（PMIC `sc27xx:*`）不跟 F50 一样"只报数据状态"，而是**一次说完两件事**：
+V50 面板上的彩灯**不在 `/sys/class/leds` 里**。它是 I²C 总线 `i2c-3` 上的一颗 **Awinic AW9523B**
+（`0x5b`，设备树 `/soc/ap-ahb/i2c@2270000/aw9523b_led@5b`），Android 侧由厂商模块 `aw9523b.ko` 驱动。
+那个模块**搬不到本项目的内核上**（vermagic 不匹配且开了 modversions），所以本方案改成
+**`mu300-led` 从用户态用 `i2cset` 直接驱动芯片** —— 不改内核、不写模块。
 
-| 有无外网 | 频段 | 灯 | 通道 |
+| 有无外网 | 频段 | 灯 | 寄存器掩码 |
 |---|---|---|---|
-| **无** | 任意 | **红** | `sc27xx:red` |
-| 有 | 5 GHz | **白** | `sc27xx:green` |
-| 有 | 2.4 GHz | **蓝** | `sc27xx:blue` |
+| **无** | 任意 | **红** | `0x2894` |
+| 有 | 5 GHz | **白** | `0xffff`（红+绿+蓝同亮） |
+| 有 | 2.4 GHz | **蓝** | `0x9442` |
 
-> 「白」是这颗 PMIC 的 `green` 通道 —— ZTE 在 Android 侧把它叫 `white`，**同一个灯，不同名字**。
-> 三个状态都是**单通道纯色、不混色**，亮度最高最可靠。
+掩码取自**原厂设备树**的 `aw9523b,idx`（厂商自己的接线定义），三者并集 `0xffff`、互不重叠。
+
+> **踩过的坑（已更正过一次错误结论）**：早先的版本把这三路写成 PMIC 的 `sc27xx:*` 并宣布"实测通过"。
+> 那是错的 —— `sc27xx:*` 是 **PMIC 背光控制器**（`led-controller@180`），在 V50 上**不驱动任何可见灯珠**，
+> 往它写 0/255 画面毫无变化。当时验的是寄存器回读值，而那三路从未点亮过一颗灯。
+> **寄存器回读对 ≠ 灯亮了**：灯光验证必须以肉眼为准。
+> 详见 `docs/08-灯光效果方案.md` 第〇节。
 
 - **「有无网」的判据 = 调制解调器数据已连接**（`mobile-data` 的 `data on`/`data 5g` 事件），
   **不去 ping 外网**，不产生额外流量与延迟。注意它**不等于真的能上外网**（DNS 坏、路由坏时它照样是白/蓝）。
 - **红优先**：三个状态里只有"没网"需要人处理，所以它盖过频段（无网 + 2.4GHz 显示红，不显示蓝）。
 - **切频段后颜色自动跟随** —— 这是补丁里 `mu300-wifi-band` 补的那一句 `mu300-led wifi sync`。
   没有它，颜色会一直停在刚切走的那一档。
-- **F50 / U30 Air 完全不受影响**：方案由 `LED_SCHEME=v50` 打开，默认是 `classic`（原灯语）。
+- **一次 `i2cset` 点亮整块面板**：16 个调光寄存器地址连续，芯片接受 I²C block 连续写
+  （`i2cset -f -y 3 0x5b 0x20 <16 字节> i`，注意 mode 字母在最后）。所以改色不必先关别的颜色。
+- **F50 / U30 Air 完全不受影响**：方案由 `LED_SCHEME=v50` + `LED_BACKEND=i2c` 打开，默认是 `classic`（原灯语）。
 
-改颜色 / 亮度不用重新编译，改 `/etc/mu300/led.conf` 即可（`LED_SCHEME`、`NO_NET_CHANNEL`、
-`NET5_CHANNEL`、`NET24_CHANNEL`、`KEY_FLASH_COUNT`、`LED_LEVEL` 百分比）。
-**想把灯变回 F50 原来的样子**：把那行 `LED_SCHEME=v50` 注释掉。
+改颜色 / 亮度不用重新编译，改 `/etc/mu300/led.conf` 即可（三个掩码、`LED_I2C_GCR` 电流档
+`0`=37mA/`1`=27.75mA/`2`=18.5mA/`3`=9.25mA、`KEY_FLASH_COUNT`、`LED_LEVEL` 百分比）。
+**想把灯变回 F50 原来的样子**：注释掉 `LED_BACKEND=i2c` 那行。
 
-两个只有实施时才会撞上、且已修的问题：
+四个只有实施时才会撞上、且已修的问题（完整说明见 `docs/08-灯光效果方案.md` 第七节）：
 
-1. **设备的 `sleep` 不吃小数秒** —— OpenWrt 自带 busybox 直接报 `sleep: invalid number`，
-   于是上游 `mu300-led nap()` 的兜底把 0.15 秒变成整整 1 秒：**闪 2 下会变成 4 秒**，
-   上游 siren 每色 0.25 秒也实际按 1 秒走。已改成优先用发布版自带的 busybox（带 `FANCY_SLEEP`）。
-2. **`nap()` 之外**：`data *` 与 `wifi *` 两套独立点灯逻辑会互相覆盖、且没人重算，
-   所以颜色统一由一个 `render()` 按"两个状态"算出来，`data` 事件、`wifi` 同步、`wake`、
-   `idle off`、`charge off`、`alarm off` 都会重绘一次。
+1. **`i2c-dev` 是模块且没人加载它** —— 引用计数为 0，重启后 `/dev/i2c-3` 不存在，灯光会**毫无报错地保持全黑**。
+   `mu300-led` 现在自己 `modprobe`（已用 `rmmod` → 运行 → 自动恢复实测）。
+2. **开机没人画第一次灯** —— 只有网络事件才重绘，modem 报告前面板全黑像坏了。
+   `init.d/mu300-buttons` 的 `start_service()` 现在画一次（开机先红，连上后转白/蓝）。
+3. **设备的 `sleep` 不吃小数秒** —— OpenWrt 自带 busybox 直接报 `sleep: invalid number`，
+   上游 `mu300-led nap()` 的兜底把 0.15 秒变成整整 1 秒：**闪 2 下会变成 4 秒**。
+   已改成优先用发布版自带的 busybox（带 `FANCY_SLEEP`）。
+4. **编码门禁（第 18 步）从来没检查过任何文件** —— `Get-ChildItem -Recurse -File -Path "$tree\*"`
+   在 PowerShell 5.1 下返回 **0 个文件**，门禁却每次打印"ok"。一个带 BOM/CRLF 的脚本照样会发到设备上。
+   已修，并注入 BOM 做反向测试确认它现在会失败。
 
-完整实测记录（含逐条验证表与退路）见 `docs/08-灯光效果方案.md`。
-
-> **颜色本身还需要你在机器旁用眼睛确认一次**：上面验证的是"哪一路被点亮、亮度多少"，
-> "`sc27xx:green` 在你眼前是不是白"只有人能做。`mu300-led test` 会逐个点亮并报名字。
+完整实测记录（**逐条肉眼确认**，含寄存器布局、掩码换算与退路）见 `docs/08-灯光效果方案.md`。
 
 ---
 
@@ -454,7 +465,7 @@ tools/
   mu300-api.ps1             ubus JSON-RPC 客户端
   mu300-console.ps1         USB 串口 COM12 读写
   push-file.ps1             推**大文件**到设备（分块；单条 argv 装不下时会静默断连）
-  led-scheme-test.sh        灯光方案的无设备回归测试（假 sysroot，18 条断言）★
+  led-scheme-test.sh        灯光方案的无设备回归测试（假 sysroot）★
   led-probe.sh              设备侧：报告三色与当前网络/频段状态（不用眼睛也能确认点亮了哪路）
   buttons-audit.sh          设备侧：数有几个按键读取进程（多于 1 就是 §4.6 那个坑）
 plugins/
@@ -481,8 +492,9 @@ probe/
 - **无显示输出**（USB-C 的 PD 芯片不应答）—— 无头设备，靠 SSH / 网页 / 串口
 - **无声音**（无喇叭无麦克风）
 - **无 SD 卡槽** —— 只能装 eMMC 空闲区（32.4 GiB，完全够用）
-- **V50 的 LED 与 F50 不同**（V50 是 `sc27xx:blue/green/red` + `aw_led`）→ `mu300-led test` 可能对不上，
-  属外观问题，不影响网络与数据
+- **V50 的面板彩灯不在 sysfs 里** —— 它是 I²C `i2c-3` 上的 AW9523B，Android 用 `aw9523b.ko` 驱动，
+  该模块在本项目内核上装不了（vermagic 不匹配 + modversions），Linux 侧改由 `mu300-led` 用户态直控
+  （`LED_BACKEND=i2c`）。所以 `mu300-led test` 遍历 sysfs 时点不到它，属外观问题，不影响网络与数据。
 - **纯 WPA3 不支持**（该 WiFi 驱动无 SAE）
 - 6.18 内核偶发启动挂死（约 1/20，会自动回 Android）→ 首次建议用 **5.4**
 

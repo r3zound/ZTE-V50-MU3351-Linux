@@ -960,7 +960,11 @@ Write-Host "=== 18. gate: nothing we ship may be UTF-16, BOM'd or CRLF ==="
 $bad = @()
 foreach ($tree in @("$Repo\openwrt\vendor-extra", "$Repo\openwrt\overlay", "$Repo\openwrt\luci-app-mu300", "$Repo\rootfs\overlay", "$Repo\boot")) {
     if (-not (Test-Path $tree)) { continue }
-    Get-ChildItem -Recurse -File -Path "$tree\*" | Where-Object {
+    # No trailing "\*" on the path, and that is not a style choice: PowerShell 5.1 returns NOTHING for
+    # `Get-ChildItem -Recurse -File -Path "$dir\*"`, so the glob is not a wildcard shortcut, it silently empties
+    # the whole gate. It reported "ok: every file that ships to the device is plain UTF-8" while looking at zero
+    # files - a UTF-16LE script or a CRLF one would have shipped the same way. Pass the directory itself.
+    Get-ChildItem -Recurse -File -Path $tree | Where-Object {
         $_.Length -gt 3 -and $_.Length -lt 2MB -and $_.Extension -notmatch '^\.(ko|img|bin|png|jpg|jpeg|gz|xz|bz2|zip|tar|so|elf|o|pyc|woff2?|ttf|pdf|deb)$'
     } | ForEach-Object {
         $b = [IO.File]::ReadAllBytes($_.FullName)
@@ -995,11 +999,11 @@ Write-Host "=== 19. gate: the key, its colours and its reader are all in place =
 # So: check the calls exist, check the branches they call exist, and check all three are mirrored.
 $ledTree = "$Repo\rootfs\overlay\opt\mu300\bin"
 $ledChecks = @(
-    @{ File = "$ledTree\mu300-led";      Have = @('"flash "*)', '"data on")', 'render() {');                     Want = 'the scheme itself: render() and the flash branch' },
+    @{ File = "$ledTree\mu300-led";      Have = @('"flash "*)', '"data on")', 'render() {', 'aw_mask()', 'aw_write()', 'aw_panel()', 'modprobe i2c-dev');                     Want = 'the scheme itself: render(), the flash branch, and the AW9523B i2c backend' },
     @{ File = "$ledTree\mu300-buttons";  Have = @('mu300-led flash', 'mu300-led alarm on');                    Want = 'the V50 key: a flash on the press, the siren on the hold' },
     @{ File = "$ledTree\mu300-wifi-band"; Have = @('mu300-led" wifi sync');                                    Want = 'a band switch telling the LED which band it is' },
-    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50');                  Want = 'the v50 scheme being turned on for the V50' },
-    @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()');                   Want = 'one key reader: a restart that leaves the old one handles every press twice' }
+    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50', 'LED_BACKEND=i2c', 'LED_I2C_BUS=', 'LED_I2C_ADDR=', 'LED_I2C_GCR=', 'LED_AW_RED=', 'LED_AW_GREEN=', 'LED_AW_BLUE=', 'NO_NET_CHANNEL=aw:red', 'NET5_CHANNEL=aw:white', 'NET24_CHANNEL=aw:blue');                  Want = 'the v50 scheme on the AW9523B: backend, bus, and the three colour masks' },
+    @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()', 'mu300-led data on');  Want = 'one key reader, and the panel drawn once per boot' }
 )
 $ledBad = @()
 foreach ($c in $ledChecks) {
@@ -1022,6 +1026,30 @@ foreach ($n in @('mu300-led', 'mu300-wifi-band', 'mu300-buttons')) {
     }
     $dst = "$Repo\openwrt\vendor-extra\opt\mu300\bin\$n"
     if (-not (Test-Path $dst)) { $ledBad += "  openwrt/vendor-extra/opt/mu300/bin/$n  ->  not mirrored yet (step 17b did not run)" }
+}
+# The three colour masks are arithmetic, not text: each is one bit per dimming register, and a typo does not fail
+# loudly - it lights the wrong LEDs or leaves half the panel off. What has to hold is that the three together are
+# exactly the 16 registers, each claimed once. That is checkable here and is not checkable anywhere else.
+$conf90 = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"
+if (Test-Path $conf90) {
+    $c90 = [IO.File]::ReadAllText($conf90)
+    $masks = @{}
+    foreach ($k in @('RED', 'GREEN', 'BLUE')) {
+        $mm = [regex]::Match($c90, "(?m)^LED_AW_$k=0x([0-9a-fA-F]+)\s*$")
+        if (-not $mm.Success) { $ledBad += "  LED_AW_$k  ->  missing or not a hex mask in 90-mu300" }
+        else { $masks[$k] = [Convert]::ToInt32($mm.Groups[1].Value, 16) }
+    }
+    if ($masks.Count -eq 3) {
+        $seen = 0; $overlap = $false
+        foreach ($k in $masks.Keys) { if ($seen -band $masks[$k]) { $overlap = $true }; $seen = $seen -bor $masks[$k] }
+        if ($overlap) { $ledBad += ('  the three masks overlap  ->  some LED would be driven by two colours at once') }
+        if ($seen -ne 0xffff) {
+            $unlit = 0
+            for ($b = 0; $b -lt 16; $b++) { if (-not ($seen -band (1 -shl $b))) { $unlit++ } }
+            $ledBad += ('  the three masks cover 0x{0:x4}, not 0xffff  ->  {1} dimming register(s) would never light' -f $seen, $unlit)
+        }
+        else { Write-Host '  checked: the three colour masks cover all 16 dimming registers, none claimed twice' }
+    }
 }
 if ($ledBad) {
     Write-Host "  FAIL: the LED scheme is not whole:"
