@@ -1,8 +1,8 @@
 diff --git a/android/magisk/mu300-linux-switch/switch.sh b/android/magisk/mu300-linux-switch/switch.sh
-index 3bbfb4f..cd2f239 100755
+index 238ad1d..745a436 100755
 --- a/android/magisk/mu300-linux-switch/switch.sh
 +++ b/android/magisk/mu300-linux-switch/switch.sh
-@@ -69,11 +69,14 @@ b_meta=$(echo "$live" | cut -c29-30)
+@@ -93,11 +93,14 @@ b_meta=$(echo "$live" | cut -c29-30)
  # line (offset 44; boot/build-boot-image.py, and mu300-update keeps the header), Android's boot images do not.
  if [ -n "$linux_slot" ]; then
      head_target=$(hex_of "$linux_boot" 0 8)
@@ -20,10 +20,10 @@ index 3bbfb4f..cd2f239 100755
  if [ "$ACTION" = status ]; then
      echo "running slot   ${slot:-unknown}"
 diff --git a/boot/build-boot-image.py b/boot/build-boot-image.py
-index bbab520..c0623fe 100755
+index fe9091f..fae3426 100755
 --- a/boot/build-boot-image.py
 +++ b/boot/build-boot-image.py
-@@ -30,6 +30,12 @@ from pathlib import Path
+@@ -30,6 +30,12 @@ from pathlib import Path, PurePosixPath
  
  HERE = Path(__file__).resolve().parent
  PAGE = 4096
@@ -37,20 +37,11 @@ index bbab520..c0623fe 100755
  MISC_BC_OFFSET = 0x800
  # persistent init log lives at 48 MiB inside boot_b (8 MiB); the image must end before it
 diff --git a/install.ps1 b/install.ps1
-index c940bbc..44c8001 100644
+index db74390..862f7c7 100644
 --- a/install.ps1
 +++ b/install.ps1
-@@ -216,7 +216,7 @@ function SelectDevice([switch]$Quiet) {
-     if ($env:ANDROID_SERIAL) { return }
-     $all = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' })
-     if ($all.Count -eq 0) { return }
--    $f50 = @($all | Where-Object { $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })
-+    $f50 = @($all | Where-Object { $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })
-     # the only adb device, and an F50/U30 Air: nothing to ask
-     if ($all.Count -eq 1 -and $f50.Count -eq 1) { $env:ANDROID_SERIAL = ($all[0] -split '\s+')[0]; return }
-     # -Quiet (waiting for the device to come back as Android): only the one F50/U30 Air, never a question.
-@@ -243,17 +243,21 @@ function Ask($question, $default) {
-     if ([string]::IsNullOrWhiteSpace($a)) { return $default } else { return (NormalizeAnswer $a.Trim()) }
+@@ -319,8 +319,12 @@ function Ask($question, $default, $Id) {
+     return $r
  }
  # adb shell with root; stdin is never forwarded so prompts of this script are not eaten
 +# The binary used to run as root. Not every device has `su` on PATH (this V50: Magisk's root lives in
@@ -61,8 +52,9 @@ index c940bbc..44c8001 100644
 -    (Quiet { adb shell "su -c '$cmd'" }) -join "`n" -replace "`r", ''
 +    (Quiet { adb shell "$script:Su -c '$cmd'" }) -join "`n" -replace "`r", ''
  }
- # Write the file on the device and pull it. cmd.exe redirection does keep the byte stream intact on this
- # side, but the damage happens on the other one: some devices give `su -c` a pty, whose ONLCR rewrites every
+ # a property of the device that needs no root (the first line of adb shell getprop)
+ function AdbProp($name) {
+@@ -333,9 +337,9 @@ function AdbProp($name) {
  # LF as CRLF, so the bytes are already corrupt before they reach the host (issue #2).
  function SuDoToFile($cmd, $path) {
      $dev = '/data/local/tmp/mu300-pull.bin'
@@ -74,18 +66,9 @@ index c940bbc..44c8001 100644
  }
  $script:PyExe = $null
  # A Python that really runs, 3.8 or newer. Being on PATH says little on Windows: without Python installed, python.exe
-@@ -369,7 +373,7 @@ if (-not $Check) {
- Quiet { adb start-server } | Out-Null
- # The device in Linux, and only a phone or tablet in Android: that is not the one to install to - offer to send the
- # device back to Android first
--$target = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' -and $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })
-+$target = @((Quiet { adb devices -l }) | Where-Object { $_ -match '^\S+\s+device\b' -and $_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })
- $linuxFirst = (-not $env:ANDROID_SERIAL) -and $target.Count -eq 0 -and (LinuxRunning)
- if (-not $linuxFirst) { SelectDevice }
- if ($linuxFirst -or (AdbState) -notmatch 'device') {
-@@ -405,6 +409,17 @@ for ($i = 0; $i -lt 60 -and (SuDo 'getprop sys.boot_completed') -ne '1'; $i++) {
-     if ($i -eq 0) { Write-Host ('  ' + (T 'waiting for Android to finish starting')) }
-     Start-Sleep 2
+@@ -738,6 +742,17 @@ if ($script:MuProgress) {
+         Info 'root.su' (@(([string]((Quiet { adb shell su -v }) -join "`n")) -split "`n")[0]).Trim()
+     } else { Info 'root' 'no' }
  }
 +# Resolve root before anything depends on it: try the plain name, then the places Magisk keeps it when it is
 +# not on PATH. Reported, so the log says which one was used.
@@ -101,34 +84,34 @@ index c940bbc..44c8001 100644
  if ((SuDo 'id -u') -ne '0') { Die (T 'su does not work on the device') }
  $model = "$(SuDo 'getprop ro.product.model') / $(SuDo 'getprop ro.product.device')"
  Write-Host (T 'device: {1}' $model)
-@@ -413,7 +428,7 @@ Write-Host (T 'device: {1}' $model)
- $DEVICE = 'f50'
- if ($model -match 'U30Air|U30_Air|U30 Air') {
+@@ -756,7 +771,7 @@ if ($model -ceq 'V50 / MU3351' -or $model -cmatch '^V50 / ' -or $model -cmatch '
+     Write-Host (T 'ZTE V50: EXPERIMENTAL, tested by nobody in this project (kano ported it); mainline kernel only; no second SIM, no NFC; USB network 192.168.79.1')
+ } elseif ($model -match 'U30Air|U30_Air|U30 Air') {
      $DEVICE = 'u30air'
 -} elseif ($model -notmatch 'MU300|F50|mu300') {
 +} elseif ($model -notmatch 'MU300|F50|mu300|V50|MU3351') {
-     if ((Ask (T 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)') 'no') -ne 'yes') { exit 1 }
- }
- if ((SuDo 'getprop ro.boot.slot_suffix') -ne '_a') { Die (T 'Android must be running from slot a') }
+     Info 'device.kind' 'unknown'
+     if ((Ask (T 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)') 'no' 'MU300_ANS_UNKNOWN_MODEL') -ne 'yes') { Progress 'error' 'message' (T 'cancelled'); exit 1 }
+     $MODEL_KNOWN = $false
 diff --git a/install.sh b/install.sh
-index 1b4d94a..d329fbc 100755
+index 23a3135..e94f2e3 100755
 --- a/install.sh
 +++ b/install.sh
-@@ -118,7 +118,7 @@ echo "$(t 'device: {1}' "$model")"
- # loads them; the boot image says which device it is for)
- case "$model" in
+@@ -350,7 +350,7 @@ case "$model" in
+         DEVICE=v50
+         echo "$(t 'ZTE V50: EXPERIMENTAL, tested by nobody in this project (kano ported it); mainline kernel only; no second SIM, no NFC; USB network 192.168.79.1')" ;;
      *U30Air*|*U30_Air*|*"U30 Air"*) DEVICE=u30air ;;
 -    *MU300*|*F50*|*mu300*) DEVICE=f50 ;;
 +    *MU300*|*F50*|*mu300*|*V50*|*MU3351*) DEVICE=f50 ;;
-     *) ask go "$(t 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)')" no; [ "$go" = yes ] || exit 1
-        DEVICE=f50 ;;
- esac
+     *) info device.kind unknown
+        ask go "$(t 'This does not look like a ZTE F50/MU300 or U30 Air. Continue anyway? (yes/no)')" no MU300_ANS_UNKNOWN_MODEL; [ "$go" = yes ] || exit 1
+        DEVICE=f50; MODEL_KNOWN=0 ;;
 diff --git a/openwrt/luci-app-mu300/htdocs/luci-static/resources/view/mu300/home.js b/openwrt/luci-app-mu300/htdocs/luci-static/resources/view/mu300/home.js
-index 6446f28..bdda26b 100644
+index bd1e320..5526a9f 100644
 --- a/openwrt/luci-app-mu300/htdocs/luci-static/resources/view/mu300/home.js
 +++ b/openwrt/luci-app-mu300/htdocs/luci-static/resources/view/mu300/home.js
-@@ -451,7 +451,11 @@ return view.extend({
- 		}
+@@ -688,7 +688,11 @@ return view.extend({
+ 		if (i.update) M.set('update', _('Version %s is out: update').format(i.update));
  		var w = i.wan || {};
  		M.v('ip').innerHTML = M.esc(w.ip4 || '--') + (w.ip6 ? '<br>' + M.esc(w.ip6) : '');
 -		M.set('dns', w.dns || '--');
@@ -138,13 +121,13 @@ index 6446f28..bdda26b 100644
 +		var dnsEl = M.v('dns');
 +		if (dnsEl) dnsEl.innerHTML = dnsList.length ? dnsList.map(M.esc).join('<br>') : '--';
  		M.set('apn', w.apn || '--');
+ 		this.paintSim(i.sim);
  		M.set('sess', w.uptime ? M.fmtUptime(w.uptime) : '--');
- 		var regmap = { 0: _('Not registered'), 1: _('Registered'), 2: _('Searching'), 3: _('Registration denied'), 4: _('Unknown'), 5: _('Registered (roaming)'), 7: _('Emergency only'), 8: _('Emergency only'), 10: _('Registered') };
 diff --git a/openwrt/luci-app-mu300/root/usr/libexec/unisoc-modem/dashboard-info b/openwrt/luci-app-mu300/root/usr/libexec/unisoc-modem/dashboard-info
-index 487fd9a..ea88f33 100755
+index def4d7f..90fb26f 100755
 --- a/openwrt/luci-app-mu300/root/usr/libexec/unisoc-modem/dashboard-info
 +++ b/openwrt/luci-app-mu300/root/usr/libexec/unisoc-modem/dashboard-info
-@@ -75,8 +75,26 @@ DATA_DEVICE=$(safe_iface "$(cfg data_device)" '')
+@@ -98,6 +98,15 @@ DATA_DEVICE=$(safe_iface "$(jval "$WANJSON" l3_device)" '')
  LAN_DEVICE=$(safe_iface "$(cfg lan_device)" br-lan)
  WIFI_DEVICE=$(safe_iface "$(cfg wifi_device)" wlan0)
  USB_DEVICE=$(safe_iface "$(cfg usb_device)" usb0)
@@ -158,20 +141,8 @@ index 487fd9a..ea88f33 100755
 +	done
 +fi
  jaddr4() { printf '%s' "$1" | sed -n 's/.*"address": *"\([^"]*\)".*/\1/p' | head -n1; }
--jarr_dns() { printf '%s' "$1" | sed -n 's/.*"dns-server": *\[\([^]]*\)\].*/\1/p' | tr -d '"' ; }
-+# jsonfilter, not sed. Two independent reasons, both live on this device (V50, 2026-10-10):
-+#   * `ubus call ... status` pretty-prints across several lines, so `"dns-server": [ ... ]` never
-+#     matches inside ONE line and a line-oriented sed finds nothing at all - jarr_dns returned
-+#     the empty string and the dashboard said "DNS --";
-+#   * the leading `.*` in such a pattern is greedy, so even on a single line it would settle on
-+#     the EMPTY "dns-server" array that "inactive" carries: the last one in the document, not the
-+#     real one.
-+# The interface had two servers configured the whole time. The field is a plain string here, so
-+# the servers are space separated and home.js breaks them onto separate lines.
-+jarr_dns() { t3 jsonfilter -s "$1" -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ' | sed 's/  *$//'; }
- 
- wan_up=$(jval "$WANJSON" up)
- [ "$wan_up" = "true" ] && wan_up=1 || wan_up=0
+ # The active DNS servers of the data interfaces. ubus pretty-prints the array over several lines, so it is read with
+ # jsonfilter: the top-level "dns-server" only (never inactive.dns-server), IPv4 and IPv6 status alike, each server
 diff --git a/openwrt/overlay/etc/apk/repositories.d/distfeeds.list b/openwrt/overlay/etc/apk/repositories.d/distfeeds.list
 new file mode 100644
 index 0000000..797e852
@@ -226,10 +197,10 @@ index 0000000..797e852
 +https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
 +https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
 diff --git a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb b/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
-index ad67005..2aeee75 100755
+index 19010c1..8f2466f 100755
 --- a/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
 +++ b/openwrt/overlay/etc/hotplug.d/iface/10-mu300-usb
-@@ -26,6 +26,21 @@ if [ -e /sys/class/net/rndis0 ]; then
+@@ -18,6 +18,21 @@ if [ -e /sys/class/net/rndis0 ]; then
  	ip link set rndis0 master br-lan 2>/dev/null
  	ip link set rndis0 up 2>/dev/null
  fi
@@ -248,14 +219,14 @@ index ad67005..2aeee75 100755
 +		ip addr del "$nic_ip" dev "$nic" 2>/dev/null || true
 +	done
 +fi
- 
- # The ECM gadget was bound in the initramfs; macOS keeps the link inactive after netifd reconfigures usb0
- # (at boot and on every network restart). Re-enumerate the gadget whenever the LAN comes up, at most every 20 s,
+ pid=$(cat /run/mu300-early-udhcpd.pid 2>/dev/null)
+ [ -n "$pid" ] && kill "$pid" 2>/dev/null
+ rm -f /run/mu300-early-udhcpd.pid
 diff --git a/openwrt/overlay/etc/init.d/mu300-buttons b/openwrt/overlay/etc/init.d/mu300-buttons
-index 440af97..aff55ae 100755
+index 440af97..d0d00c2 100755
 --- a/openwrt/overlay/etc/init.d/mu300-buttons
 +++ b/openwrt/overlay/etc/init.d/mu300-buttons
-@@ -1,14 +1,38 @@
+@@ -1,6 +1,7 @@
  #!/bin/sh /etc/rc.common
  # the buttons: power wakes the LEDs (held: shut down), the U30 Air's Wi-Fi key switches the hotspot band
 -# (see /opt/mu300/bin/mu300-buttons)
@@ -264,16 +235,7 @@ index 440af97..aff55ae 100755
  START=95
  USE_PROCD=1
  export PATH="$PATH:/opt/mu300/busybox-bin"
- 
- start_service() {
- 	[ -x /opt/mu300/bin/mu300-keys ] || return 0
-+	# The panel's colour on the V50, drawn once per boot. Nothing else asks for it: mu300-led renders on a network
-+	# event, and the modem can take a minute to report in, so until then a device that is working perfectly would
-+	# sit there with no light at all and read as broken. render() starts from "no network" (red) on a fresh boot,
-+	# which is the honest state to be showing while waiting.
-+	/opt/mu300/bin/mu300-led data on >/dev/null 2>&1
- 	procd_open_instance buttons
- 	procd_set_param command /opt/mu300/bin/mu300-buttons
+@@ -12,3 +13,21 @@ start_service() {
  	procd_set_param respawn 3600 10 0
  	procd_close_instance
  }
@@ -296,7 +258,7 @@ index 440af97..aff55ae 100755
 +	done
 +}
 diff --git a/openwrt/overlay/etc/init.d/mu300-hw b/openwrt/overlay/etc/init.d/mu300-hw
-index 61efb04..1ad8e62 100755
+index b6e14c7..74fb158 100755
 --- a/openwrt/overlay/etc/init.d/mu300-hw
 +++ b/openwrt/overlay/etc/init.d/mu300-hw
 @@ -6,6 +6,38 @@ export PATH="$PATH:/opt/mu300/busybox-bin"
@@ -338,7 +300,7 @@ index 61efb04..1ad8e62 100755
  boot() {
  	/opt/mu300/bin/mu300-led power on
  	/opt/mu300/bin/mu300-usb boot
-@@ -13,14 +45,15 @@ boot() {
+@@ -15,18 +47,19 @@ boot() {
  }
  
  hw_bringup() {
@@ -354,13 +316,17 @@ index 61efb04..1ad8e62 100755
 -	/opt/mu300/bin/openwrt-wifi-config >>/tmp/mu300-wifi-start.log 2>&1
 +	bringup_step 20 regdb-load /opt/mu300/bin/regdb-load
 +	bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config
+ 	# a hotspot set to WPA3/SAE (the U30 Air's SAE offload, now disabled: docs/U30AIR-SAE.md, FINDINGS 80) becomes
+ 	# WPA2-PSK with the same password, before the Wi-Fi restart below, which is the start that brings the hotspot up
+ 	# (netifd's own, earlier one ends AP-DISABLED under the world regulatory domain; the wifi-scripts refuse SAE)
+ 	/opt/mu300/bin/openwrt-wifi-wpa2-only migrate >>/tmp/mu300-wifi-start.log 2>&1
  	# the U30 Air's NFC tag: the hotspot's name and password, if that is what it holds (see mu300-nfc)
 -	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && /opt/mu300/bin/mu300-nfc sync >/tmp/mu300-nfc.log 2>&1
 +	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync
  	# apply the country before netifd starts hostapd, otherwise 5 GHz channels are still NO-IR under world rules
  	country=$(uci -q get wireless.radio0.country)
  	if [ -n "$country" ]; then
-@@ -29,8 +62,8 @@ hw_bringup() {
+@@ -35,8 +68,8 @@ hw_bringup() {
  	fi
  	# a reload does not restart a hostapd interface that went AP-DISABLED while the world regulatory domain
  	# was still active; one down/up right after the country is live does
@@ -372,7 +338,7 @@ index 61efb04..1ad8e62 100755
  
  start() {
 diff --git a/openwrt/overlay/etc/init.d/mu300-post b/openwrt/overlay/etc/init.d/mu300-post
-index 5624030..9f60a82 100755
+index 04fbe82..35f6f4f 100755
 --- a/openwrt/overlay/etc/init.d/mu300-post
 +++ b/openwrt/overlay/etc/init.d/mu300-post
 @@ -47,8 +47,22 @@ start_service() {
@@ -400,10 +366,10 @@ index 5624030..9f60a82 100755
  	procd_close_instance
  }
 diff --git a/openwrt/overlay/etc/uci-defaults/90-mu300 b/openwrt/overlay/etc/uci-defaults/90-mu300
-index 2aab62b..63623f5 100755
+index f14d2db..6d5b124 100755
 --- a/openwrt/overlay/etc/uci-defaults/90-mu300
 +++ b/openwrt/overlay/etc/uci-defaults/90-mu300
-@@ -36,9 +36,15 @@ if [ "$run" = first ]; then
+@@ -40,9 +40,15 @@ if [ "$run" = first ]; then
  	# lan ip6assign 64: a carrier hands out one /64 (the wan_6 that mu300cell adds), and the default /60 request
  	# would leave the LAN without IPv6 (openwrt-luci's 91-mu300-luci, run after this, asks for a /60 of the ULA)
  	uci -q batch <<UCI
@@ -422,7 +388,7 @@ index 2aab62b..63623f5 100755
  set network.lan.ipaddr='$lan_ip'
  set network.lan.netmask='255.255.255.0'
  set network.lan.ip6assign='64'
-@@ -59,7 +65,15 @@ if [ "$run" != done ]; then
+@@ -63,7 +69,15 @@ if [ "$run" != done ]; then
  	# Forwarded TCP/UDP through the kernel's software flowtable (fw4 puts sipa_eth0 in it: patches/fw4-sipa-offload.patch).
  	# The Unisoc SIPA and SC2355 drivers have no nftables hardware flow offload. (mu300-ttl turns it off while a TTL
  	# is set.)
@@ -439,7 +405,7 @@ index 2aab62b..63623f5 100755
  	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
  fi
  
-@@ -70,6 +84,15 @@ set network.wan.proto='mu300cell'
+@@ -74,6 +88,15 @@ set network.wan.proto='mu300cell'
  UCI
  # the wired LAN does not wait for a member that is not there yet (Wi-Fi, a gadget netdev)
  [ -z "$dev" ] || uci set network.$dev.bridge_empty='1'
@@ -455,7 +421,7 @@ index 2aab62b..63623f5 100755
  # K25 (ported from the kanoqwq fork, cd4fb28): the USB host keeps the address it had from the early server, and
  # dnsmasq broadcasts its OFFER/ACK: Windows can keep asking for the early lease after it has already removed that
  # address, and a unicast reply to the removed address is lost in the NCM host stack. The address is the one preinit's
-@@ -99,6 +122,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
+@@ -103,6 +126,20 @@ if ! uci -q show firewall | grep -q "^firewall\.@zone\[[0-9]*\]\.name='earlyusb'
  	uci set firewall.$early.output='ACCEPT'
  	uci set firewall.$early.forward='REJECT'
  fi
@@ -473,63 +439,11 @@ index 2aab62b..63623f5 100755
 +		uci -q get "firewall.$z.device" | grep -qx "$lan_dev" || uci add_list "firewall.$z.device=$lan_dev"
 +	done
 +fi
- # LuCI's language (both systems) is English, not "auto" (which follows the browser): once, with its own marker
- # luci.mu300.lang, so a language the user picks later stays through every update. A system from before the marker
- # that still says "auto" (or nothing) gets English too: auto was nobody's choice there (luci-base's default, and
-@@ -110,7 +147,7 @@ fi
- if uci -q get luci.main >/dev/null; then
- 	uci -q get luci.languages >/dev/null || uci -q set luci.languages=internal
- 	[ ! -e /usr/lib/lua/luci/i18n/base.tr.lmo ] || uci -q get luci.languages.tr >/dev/null ||
--		uci -q set luci.languages.tr='Türkçe (Turkish)'
-+		uci -q set luci.languages.tr='T眉rk莽e (Turkish)'
- 	[ ! -e /usr/lib/lua/luci/i18n/base.zh-cn.lmo ] || uci -q get luci.languages.zh_cn >/dev/null ||
- 		uci -q set luci.languages.zh_cn="$(printf '\347\256\200\344\275\223\344\270\255\346\226\207 (Simplified Chinese)')"
- 	uci commit luci
-@@ -123,6 +160,42 @@ set luci.mu300.lang='1'
- UCI
- 	uci commit luci
- fi
-+# The V50's LED scheme: one colour out of two states - red without a network, white on 5 GHz, blue on 2.4 GHz -
-+# which is what LED_SCHEME=v50 tells /opt/mu300/bin/mu300-led to draw (and which /opt/mu300/bin/mu300-wifi-band
-+# keeps in step after a band switch). Written once and never rewritten, so a calibration - a colour that came out
-+# too bright, or a channel swapped for another - survives every update. Remove LED_SCHEME=v50 (or the file) to get
-+# the F50's colours back: red without service, white on 5G data, blue on 4G data.
-+#
-+# The panel's lamps are not in /sys/class/leds: they are an AW9523B on i2c-3, whose vendor driver belongs to the
-+# stock Android kernel and cannot be loaded here, so mu300-led writes the chip itself (LED_BACKEND=i2c). The three
-+# masks are the vendor device tree's own aw9523b,idx lists, turned into one bit per dimming register 0x20-0x2F -
-+# those registers are not in pin order (8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a colour is a mask, not a range.
-+# They add up to 0xffff, every register is claimed once and no two colours overlap. "white" is all three at once and
-+# needs no line of its own, but it does need a level of its own: three emitters reading at the same current look
-+# about three times as bright as one, and LED_AW_WHITE_LEVEL is what brings white back level with red and blue
-+# while keeping it white. Walked down on the panel from 100% (glaring) through 80/65/50/40/32/20 to 10, which is a
-+# calm night-time white that still reads as white rather than as grey. Raise it if the panel is in a bright room.
-+# LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
-+if [ ! -e /etc/mu300/led.conf ]; then
-+	mkdir -p /etc/mu300
-+	cat > /etc/mu300/led.conf <<'LEDCONF'
-+LED_TIMEOUT=0
-+LED_SCHEME=v50
-+LED_BACKEND=i2c
-+LED_I2C_BUS=3
-+LED_I2C_ADDR=0x5b
-+LED_I2C_GCR=2
-+LED_AW_RED=0x2894
-+LED_AW_GREEN=0x4329
-+LED_AW_BLUE=0x9442
-+LED_AW_WHITE_LEVEL=10
-+NO_NET_CHANNEL=aw:red
-+NET5_CHANNEL=aw:white
-+NET24_CHANNEL=aw:blue
-+KEY_FLASH_COUNT=2
-+#LED_LEVEL=100
-+LEDCONF
-+fi
- # network last: a first run cut short before its commit has no wan proto mu300cell yet, and runs again as a first
- # install, in full
- uci commit system
+ # Issue #67: the lan and wan zones name their devices, not only their networks. fw4 renders a zone's rules from
+ # the devices its networks have at the time, and S19 firewall runs before S20 network: on the boot ruleset neither
+ # br-lan nor the modem's sipa_eth0 exists yet, so the LAN's input rules and the wan's masquerade are left out, for
 diff --git a/openwrt/overlay/opt/mu300/bin/mu300-lancheck b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
-new file mode 100644
+new file mode 100755
 index 0000000..ea2cc58
 --- /dev/null
 +++ b/openwrt/overlay/opt/mu300/bin/mu300-lancheck
@@ -688,11 +602,11 @@ index 0000000..797e852
 +https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
 +https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
 diff --git a/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb b/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb
-new file mode 100644
-index 0000000..2aeee75
+new file mode 100755
+index 0000000..8f2466f
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/hotplug.d/iface/10-mu300-usb
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,84 @@
 +#!/bin/sh
 +# MU300: the LAN is up - the hand-over from the early DHCP server, then the macOS re-enumeration.
 +[ "$ACTION" = ifup ] && [ "$INTERFACE" = lan ] || exit 0
@@ -703,20 +617,12 @@ index 0000000..2aeee75
 +# through the wrong device and the host cannot even ping br-lan. It is taken off a bridge port only when it is the
 +# bridge's own, after netifd has put that on br-lan. And rndis0: an installed system's bridge section may predate a
 +# switch to RNDIS, so it is put back into br-lan on every LAN ifup (a network reload too).
-+pid=$(cat /run/mu300-early-udhcpd.pid 2>/dev/null)
-+[ -n "$pid" ] && kill "$pid" 2>/dev/null
-+rm -f /run/mu300-early-udhcpd.pid
-+bridge_ip=$(ip -4 -o addr show dev br-lan 2>/dev/null | awk 'NR == 1 { print $4 }')
-+if [ -n "$bridge_ip" ]; then
-+	for nic in usb0 rndis0; do
-+		ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' || continue
-+		# the bridge's address with whatever prefix the port has (preinit's mask can differ from netifd's)
-+		nic_ip=$(ip -4 -o addr show dev "$nic" 2>/dev/null |
-+			awk -v a="${bridge_ip%/*}" '{ split($4, p, "/"); if (p[1] == a) { print $4; exit } }')
-+		[ -n "$nic_ip" ] || continue
-+		ip addr del "$nic_ip" dev "$nic" 2>/dev/null || true
-+	done
-+fi
++#
++# The gadget's netdev joins the bridge before anything is taken off it: the loop below can only take the address
++# off a port that already is one. The other way round (until 2026-10-07), rndis0 - which an install that switched
++# to RNDIS later does not have in its bridge section - was not a port yet when the loop ran, kept the address
++# while br-lan held the same one, and neither the Wi-Fi clients nor the USB host could use the LAN (issue #45,
++# measured on a user's F50; the serial console was the only way in).
 +if [ -e /sys/class/net/rndis0 ]; then
 +	ip link set rndis0 master br-lan 2>/dev/null
 +	ip link set rndis0 up 2>/dev/null
@@ -730,6 +636,20 @@ index 0000000..2aeee75
 +if [ -n "$bridge_ip" ]; then
 +	for nic in usb0 rndis0; do
 +		ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' || continue
++		nic_ip=$(ip -4 -o addr show dev "$nic" 2>/dev/null |
++			awk -v a="${bridge_ip%/*}" '{ split($4, p, "/"); if (p[1] == a) { print $4; exit } }')
++		[ -n "$nic_ip" ] || continue
++		ip addr del "$nic_ip" dev "$nic" 2>/dev/null || true
++	done
++fi
++pid=$(cat /run/mu300-early-udhcpd.pid 2>/dev/null)
++[ -n "$pid" ] && kill "$pid" 2>/dev/null
++rm -f /run/mu300-early-udhcpd.pid
++bridge_ip=$(ip -4 -o addr show dev br-lan 2>/dev/null | awk 'NR == 1 { print $4 }')
++if [ -n "$bridge_ip" ]; then
++	for nic in usb0 rndis0; do
++		ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' || continue
++		# the bridge's address with whatever prefix the port has (preinit's mask can differ from netifd's)
 +		nic_ip=$(ip -4 -o addr show dev "$nic" 2>/dev/null |
 +			awk -v a="${bridge_ip%/*}" '{ split($4, p, "/"); if (p[1] == a) { print $4; exit } }')
 +		[ -n "$nic_ip" ] || continue
@@ -751,18 +671,32 @@ index 0000000..2aeee75
 +[ -e $g/UDC ] || exit 0
 +udc=$(cat $g/UDC)
 +[ -n "$udc" ] || udc=$(ls /sys/class/udc | head -1)
++# The gadget netdevs that are bridge ports now: after the rebind they are made ports again, should the rebind have
++# left one bare (a netdev with no server, the early one being gone, and no LAN for the USB host; netifd puts back a
++# port that is in its configuration, usb0, never one it never had, rndis0 - issue #45). A netdev that is not a port
++# stays out: a user who took usb0 out of br-lan for an interface of its own keeps it that way.
++ports=
++for nic in usb0 rndis0; do
++	ip -o link show dev "$nic" 2>/dev/null | grep -q 'master br-lan' && ports="$ports $nic"
++done
 +(
 +	sleep 2
 +	echo "" > $g/UDC 2>/dev/null
 +	sleep 1
 +	echo "$udc" > $g/UDC && logger -t mu300 "usb gadget re-enumerated on $udc"
++	sleep 1
++	for nic in $ports; do
++		[ -e /sys/class/net/$nic ] || continue
++		ip link set "$nic" master br-lan 2>/dev/null
++		ip link set "$nic" up 2>/dev/null
++	done
 +) &
 diff --git a/openwrt/vendor-extra/etc/init.d/mu300-buttons b/openwrt/vendor-extra/etc/init.d/mu300-buttons
-new file mode 100644
-index 0000000..aff55ae
+new file mode 100755
+index 0000000..d0d00c2
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/init.d/mu300-buttons
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,33 @@
 +#!/bin/sh /etc/rc.common
 +# the buttons: power wakes the LEDs (held: shut down), the U30 Air's Wi-Fi key switches the hotspot band
 +# (see /opt/mu300/bin/mu300-buttons). The V50 has one key instead (KEY_FN 464): a press switches the band,
@@ -773,11 +707,6 @@ index 0000000..aff55ae
 +
 +start_service() {
 +	[ -x /opt/mu300/bin/mu300-keys ] || return 0
-+	# The panel's colour on the V50, drawn once per boot. Nothing else asks for it: mu300-led renders on a network
-+	# event, and the modem can take a minute to report in, so until then a device that is working perfectly would
-+	# sit there with no light at all and read as broken. render() starts from "no network" (red) on a fresh boot,
-+	# which is the honest state to be showing while waiting.
-+	/opt/mu300/bin/mu300-led data on >/dev/null 2>&1
 +	procd_open_instance buttons
 +	procd_set_param command /opt/mu300/bin/mu300-buttons
 +	procd_set_param respawn 3600 10 0
@@ -802,11 +731,11 @@ index 0000000..aff55ae
 +	done
 +}
 diff --git a/openwrt/vendor-extra/etc/init.d/mu300-hw b/openwrt/vendor-extra/etc/init.d/mu300-hw
-new file mode 100644
-index 0000000..1ad8e62
+new file mode 100755
+index 0000000..74fb158
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/init.d/mu300-hw
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,77 @@
 +#!/bin/sh /etc/rc.common
 +# Hardware bring-up before netifd: vendor drivers, zram, Wi-Fi (SC2355), first-boot Wi-Fi config, Bluetooth off
 +START=12
@@ -850,6 +779,8 @@ index 0000000..1ad8e62
 +boot() {
 +	/opt/mu300/bin/mu300-led power on
 +	/opt/mu300/bin/mu300-usb boot
++	# the kernel's module helper once its table is made (~2 s; FINDINGS 163)
++	/opt/mu300/bin/mu300-modprobe-guard --prepare > /tmp/mu300-modprobe-guard.log 2>&1 &
 +	hw_bringup > /tmp/mu300-hw.log 2>&1 &
 +}
 +
@@ -861,6 +792,10 @@ index 0000000..1ad8e62
 +	# cfg80211 looked for regulatory.db before the rootfs was mounted; load it now so hostapd sees the country rules
 +	bringup_step 20 regdb-load /opt/mu300/bin/regdb-load
 +	bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config
++	# a hotspot set to WPA3/SAE (the U30 Air's SAE offload, now disabled: docs/U30AIR-SAE.md, FINDINGS 80) becomes
++	# WPA2-PSK with the same password, before the Wi-Fi restart below, which is the start that brings the hotspot up
++	# (netifd's own, earlier one ends AP-DISABLED under the world regulatory domain; the wifi-scripts refuse SAE)
++	/opt/mu300/bin/openwrt-wifi-wpa2-only migrate >>/tmp/mu300-wifi-start.log 2>&1
 +	# the U30 Air's NFC tag: the hotspot's name and password, if that is what it holds (see mu300-nfc)
 +	[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync
 +	# apply the country before netifd starts hostapd, otherwise 5 GHz channels are still NO-IR under world rules
@@ -879,8 +814,8 @@ index 0000000..1ad8e62
 +	boot
 +}
 diff --git a/openwrt/vendor-extra/etc/init.d/mu300-post b/openwrt/vendor-extra/etc/init.d/mu300-post
-new file mode 100644
-index 0000000..9f60a82
+new file mode 100755
+index 0000000..35f6f4f
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/init.d/mu300-post
 @@ -0,0 +1,68 @@
@@ -890,17 +825,6 @@ index 0000000..9f60a82
 +START=99
 +USE_PROCD=1
 +export PATH="$PATH:/opt/mu300/busybox-bin"
-+
-+# LuCI (or "uci commit wireless; reload_config") turning the hotspot off or on: no hostapd hook tells mu300-led,
-+# so the Wi-Fi LED follows what wlan0 is for two minutes: Wi-Fi turned off and on again at once took hostapd 63 s
-+# to come back on F50 #1 (6.18). (A reload only runs this.)
-+service_triggers() {
-+	procd_add_reload_trigger wireless
-+}
-+
-+reload_service() {
-+	( sleep 5; /opt/mu300/bin/mu300-led wifi sync 120 ) >/dev/null 2>&1 &
-+}
 +
 +start_service() {
 +	# the commands on the PATH (/usr/bin): new ones on a system installed before they existed, and the extras'
@@ -919,6 +843,17 @@ index 0000000..9f60a82
 +	procd_set_param command /opt/mu300/bin/mobile-data watch
 +	procd_set_param env MU300_NETIFD=1 PATH="$PATH"
 +	procd_set_param respawn 3600 30 0
++	# its messages ("mobile data lost ... reconnecting", "no answer about the data context") go to stderr: into the
++	# system log, as on Ubuntu's journal (procd kept none of them; FINDINGS 90)
++	procd_set_param stderr 1
++	procd_close_instance
++	# the Wi-Fi LED follows hostapd's ubus object, whoever starts or stops the access point (LuCI's wireless page,
++	# the panel, "wifi down", a WCN reset, a hostapd that died): no hook of hostapd's tells mu300-led, and this
++	# replaced two minutes of looking at wlan0 after every wireless reload (and missed everything else)
++	procd_open_instance ledevents
++	procd_set_param command /opt/mu300/bin/mu300-led events
++	procd_set_param env PATH="$PATH"
++	procd_set_param respawn 3600 5 0
 +	procd_close_instance
 +	procd_open_instance thermalguard
 +	procd_set_param command /opt/mu300/bin/thermal-guard
@@ -953,11 +888,11 @@ index 0000000..9f60a82
 +	procd_close_instance
 +}
 diff --git a/openwrt/vendor-extra/etc/uci-defaults/90-mu300 b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
-new file mode 100644
-index 0000000..63623f5
+new file mode 100755
+index 0000000..6d5b124
 --- /dev/null
 +++ b/openwrt/vendor-extra/etc/uci-defaults/90-mu300
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,200 @@
 +#!/bin/sh
 +# The MU300's OpenWrt settings: what the system needs on every run, and first-install defaults once.
 +#
@@ -965,7 +900,7 @@ index 0000000..63623f5
 +# /etc/uci-defaults again) and keep /etc/config, so it runs on the first boot after every update, against the
 +# user's settings.
 +#
-+# Once (a first install): one LAN for USB and Wi-Fi (192.168.77.1/24 on an F50, 192.168.78.1/24 on a U30 Air) with
++# Once (a first install): one LAN for USB and Wi-Fi (192.168.77.1/24 on an F50, 192.168.78.1/24 on a U30 Air, 192.168.79.1/24 on a V50) with
 +# the USB gadget in its bridge, no wan6, an empty APN, the hostname and time zone, and fw4's software flowtable. The
 +# marker system.mu300.defaults is written last, in /etc/config with the settings it guards: an update keeps both, a
 +# fresh or reset configuration has neither and gets the defaults again.
@@ -974,7 +909,11 @@ index 0000000..63623f5
 +# the one default the releases before the marker did not set (the flowtable), and the marker.
 +#
 +# Every run: wan is the modem's, the LAN bridge does not wait for a missing member, the USB host's pinned lease when
-+# there is none (K25), the early USB path's firewall zone (K26), and the USB serial console in the fresh inittab.
++# there is none (K25), the early USB path's firewall zone (K26), logd's 1 MiB buffer over a stock size, and the USB
++# serial console in the fresh inittab.
++# /etc/config/network can hold a password (the APN's, FINDINGS 65; a PPPoE or WireGuard one): root's alone from the
++# first boot on, before anybody types one in. uci keeps the mode of a file it rewrites. (No link is followed.)
++[ -f /etc/config/network ] && [ ! -L /etc/config/network ] && chmod 600 /etc/config/network 2>/dev/null
 +lan_ip=$(/opt/mu300/bin/mu300-lan-ip)
 +# The USB host's MAC (K25): boot/init leaves it in /run (the gadget's host_addr); else the gadget's own address
 +# tells it (init gives the host the next one: :01 -> :02 for usb0, :03 -> :04 for rndis0).
@@ -1096,6 +1035,19 @@ index 0000000..63623f5
 +		uci -q get "firewall.$z.device" | grep -qx "$lan_dev" || uci add_list "firewall.$z.device=$lan_dev"
 +	done
 +fi
++# Issue #67: the lan and wan zones name their devices, not only their networks. fw4 renders a zone's rules from
++# the devices its networks have at the time, and S19 firewall runs before S20 network: on the boot ruleset neither
++# br-lan nor the modem's sipa_eth0 exists yet, so the LAN's input rules and the wan's masquerade are left out, for
++# the reload every ifup triggers to fill in. On the 5.4 kernel that reload failed (hotplug.d/iface/19-mu300-fw4),
++# and the device came up with no DHCP, no LuCI and no NAT on every boot (#67; #61 looks the same). With the devices
++# named, the boot ruleset is complete whatever the reloads do. Added to a zone that lacks its device; once.
++# sipa_eth8 is the F50's internal card's bearer (mu300-sim select internal; docs/SIM-SELECTION.md): named too, so
++# LAN clients are masqueraded on it from the boot ruleset on, the same as on sipa_eth0.
++for zd in lan:br-lan wan:sipa_eth0 wan:sipa_eth8; do
++	zone=$(uci -q show firewall | sed -n "s/^\(firewall\.@zone\[[0-9]*\]\)\.name='${zd%:*}'$/\1/p" | head -1)
++	[ -n "$zone" ] || continue
++	case " $(uci -q get $zone.device) " in *" ${zd#*:} "*) ;; *) uci add_list $zone.device="${zd#*:}" ;; esac
++done
 +# LuCI's language (both systems) is English, not "auto" (which follows the browser): once, with its own marker
 +# luci.mu300.lang, so a language the user picks later stays through every update. A system from before the marker
 +# that still says "auto" (or nothing) gets English too: auto was nobody's choice there (luci-base's default, and
@@ -1107,7 +1059,7 @@ index 0000000..63623f5
 +if uci -q get luci.main >/dev/null; then
 +	uci -q get luci.languages >/dev/null || uci -q set luci.languages=internal
 +	[ ! -e /usr/lib/lua/luci/i18n/base.tr.lmo ] || uci -q get luci.languages.tr >/dev/null ||
-+		uci -q set luci.languages.tr='T眉rk莽e (Turkish)'
++		uci -q set luci.languages.tr='Türkçe (Turkish)'
 +	[ ! -e /usr/lib/lua/luci/i18n/base.zh-cn.lmo ] || uci -q get luci.languages.zh_cn >/dev/null ||
 +		uci -q set luci.languages.zh_cn="$(printf '\347\256\200\344\275\223\344\270\255\346\226\207 (Simplified Chinese)')"
 +	uci commit luci
@@ -1120,42 +1072,11 @@ index 0000000..63623f5
 +UCI
 +	uci commit luci
 +fi
-+# The V50's LED scheme: one colour out of two states - red without a network, white on 5 GHz, blue on 2.4 GHz -
-+# which is what LED_SCHEME=v50 tells /opt/mu300/bin/mu300-led to draw (and which /opt/mu300/bin/mu300-wifi-band
-+# keeps in step after a band switch). Written once and never rewritten, so a calibration - a colour that came out
-+# too bright, or a channel swapped for another - survives every update. Remove LED_SCHEME=v50 (or the file) to get
-+# the F50's colours back: red without service, white on 5G data, blue on 4G data.
-+#
-+# The panel's lamps are not in /sys/class/leds: they are an AW9523B on i2c-3, whose vendor driver belongs to the
-+# stock Android kernel and cannot be loaded here, so mu300-led writes the chip itself (LED_BACKEND=i2c). The three
-+# masks are the vendor device tree's own aw9523b,idx lists, turned into one bit per dimming register 0x20-0x2F -
-+# those registers are not in pin order (8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a colour is a mask, not a range.
-+# They add up to 0xffff, every register is claimed once and no two colours overlap. "white" is all three at once and
-+# needs no line of its own, but it does need a level of its own: three emitters reading at the same current look
-+# about three times as bright as one, and LED_AW_WHITE_LEVEL is what brings white back level with red and blue
-+# while keeping it white. Walked down on the panel from 100% (glaring) through 80/65/50/40/32/20 to 10, which is a
-+# calm night-time white that still reads as white rather than as grey. Raise it if the panel is in a bright room.
-+# LED_I2C_GCR=2 is IMAX/2 = 18.5 mA, chosen on the panel; 0 is 37 mA and 3 is 9.25 mA.
-+if [ ! -e /etc/mu300/led.conf ]; then
-+	mkdir -p /etc/mu300
-+	cat > /etc/mu300/led.conf <<'LEDCONF'
-+LED_TIMEOUT=0
-+LED_SCHEME=v50
-+LED_BACKEND=i2c
-+LED_I2C_BUS=3
-+LED_I2C_ADDR=0x5b
-+LED_I2C_GCR=2
-+LED_AW_RED=0x2894
-+LED_AW_GREEN=0x4329
-+LED_AW_BLUE=0x9442
-+LED_AW_WHITE_LEVEL=10
-+NO_NET_CHANNEL=aw:red
-+NET5_CHANNEL=aw:white
-+NET24_CHANNEL=aw:blue
-+KEY_FLASH_COUNT=2
-+#LED_LEVEL=100
-+LEDCONF
-+fi
++# logd's ring buffer (FINDINGS 191): OpenWrt's 128 KiB held only the last two minutes of an F50's log, so what the
++# services said at boot was gone before anybody looked. A boot alone writes about 500 KiB; 1 MiB of the 1.5 GB RAM
++# keeps all of it and more than an hour after. From the next start of logd (this runs before it at boot). Every
++# run, but only over the stock sizes (none, 64, 128): a size the user set stays.
++case $(uci -q get system.@system[0].log_size) in ''|64|128) uci -q set system.@system[0].log_size='1024' ;; esac
 +# network last: a first run cut short before its commit has no wan proto mu300cell yet, and runs again as a first
 +# install, in full
 +uci commit system
@@ -1173,20 +1094,20 @@ index 0000000..63623f5
 +fi
 +exit 0
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons b/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons
-new file mode 100644
-index 0000000..ec0d405
+new file mode 100755
+index 0000000..4b3ce20
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-buttons
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,144 @@
 +#!/bin/sh
 +# The buttons (Ubuntu and OpenWrt; run by mu300-buttons.service / /etc/init.d/mu300-buttons):
 +#   power, short press        wake the LEDs (they go dark after LED_TIMEOUT, see mu300-led)
-+#   power, held 3 s           shut down cleanly (the battery-powered U30 Air; the F50 starts again on USB power)
-+#   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED shows the band: blue 5, white 2.4)
++#   power, held 3 s           shut down cleanly (the battery-powered U30 Air; the F50 starts again on USB power);
++#                             in the charging boot it starts the device instead, as in the stock charger mode
++#   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED: white 5, blue 2.4, FINDINGS 152)
 +#   Wi-Fi key, held 3 s       hotspot off / on
-+# The V50 has a single key and it is neither of those (KEY_FN 464, "Function Key" in its device tree):
-+#   that key, short press     hotspot 2.4 <-> 5 GHz, with the colour flashing (mu300-led flash) to say it was heard
-+#   that key, held 10 s       reboot, all three colours flashing (mu300-led alarm) until the power goes
++#   function key, short press hotspot 2.4 <-> 5 GHz, with the colour flashing (mu300-led flash; the V50's one key)
++#   function key, held 10 s   reboot, all three colours flashing (mu300-led alarm) until the power goes
 +# Every press lights the LEDs first (`mu300-led wake`: also in mu300-power's idle, and without any daemon), so a key
 +# always shows life. Then it wakes mu300-power with the key's name (`mu300-power wake wifi|power`; other keys count as
 +# power), in the background: the wake restores whatever is down by looking (hotspot, modem, LEDs, CPU), which can
@@ -1197,14 +1118,15 @@ index 0000000..ec0d405
 +# uptime of the hold) while the user has it off, so neither a wake nor mu300-power's self-check turns it back on; the
 +# direction is decided and the marker written before the wake starts, so the wake of the same press cannot undo it.
 +# The toggles themselves (hotspot, band) run in the background under a deadline: a later press always shows life.
-+# mu300-keys reports the presses; its tick every 5 s lets the LEDs time out. Ubuntu's logind leaves the power key
-+# to this script (/etc/systemd/logind.conf.d/mu300-buttons.conf): it used to power the device off at a touch.
++# mu300-keys reports the presses; its tick every 5 s lets the LEDs time out and the U30 Air's battery LED follow the
++# battery. Ubuntu's logind leaves the power key to this script (/etc/systemd/logind.conf.d/mu300-buttons.conf): it
++# used to power the device off at a touch.
 +export PATH="$PATH:/opt/mu300/bin:/usr/sbin:/sbin"
 +KEY_POWER=116
 +KEY_WIFI=138   # "Wifi Switch Key" in the U30 Air's device tree (KEY_HELP's code, as its Android maps it)
 +# The V50's board has ONE key and it is neither of the two above: its device tree calls it key-function
 +# with linux,code 0x1d0 = 464 = KEY_FN. Nothing matched that code, so on this device every press fell
-+# through the case below and did nothing at all - no band switch, no shutdown. Measured, 2026-10-10:
++# through the case below and did nothing at all - no band switch, no reboot. Measured, 2026-10-10:
 +#   114 KEY_VOLUMEDOWN | 115 KEY_VOLUMEUP | 190 KEY_F20 (key-power) | 464 KEY_FN (key-function)
 +KEY_FN=464
 +is_openwrt() { [ -e /etc/openwrt_release ]; }
@@ -1276,8 +1198,9 @@ index 0000000..ec0d405
 +band_toggle() { mu300-wifi-band toggle | logger -t mu300-buttons 2>/dev/null; }
 +
 +mu300-keys -l "$HOLD" -t 5 | { while read -r code kind; do
-+    # the tick every 5 s is no press: it only lets the LEDs time out
-+    if [ "$kind" = tick ]; then mu300-led sleep --if-due; continue; fi
++    # the tick every 5 s is no press: it lets the LEDs time out, and the U30 Air's battery LED follow the charge
++    # (plugged in, unplugged, the 60 % and 10 % marks)
++    if [ "$kind" = tick ]; then mu300-led tick; continue; fi
 +    mu300-led wake   # first, whatever else this key does or whatever state anything is in
 +    was_idle=0; s=$(cat "$PST/state" 2>/dev/null); [ -z "$s" ] || [ "$s" = active ] || was_idle=1
 +    [ ! -e "$LEDIDLE" ] || was_idle=1   # dark on purpose (idle, or someone's mu300-led idle on): this press only wakes
@@ -1288,6 +1211,13 @@ index 0000000..ec0d405
 +        mkdir -p "$PST" 2>/dev/null
 +        if hotspot_is_up; then dir=off; cut -d. -f1 "${MU300_SYSROOT:-}/proc/uptime" > "$PST/hotspot-off" 2>/dev/null
 +        else dir=on; rm -f "$PST/hotspot-off"; fi
++    fi
++    # a held power key in the charging boot starts the device (the stock charger mode: hold power to switch it on;
++    # FINDINGS 196): the wake without a key name ends it, as the Wi-Fi key does
++    if [ "$code $kind" = "$KEY_POWER long" ] && [ "$s" = charging-boot ]; then
++        logger -t mu300-buttons "power button held in the charging boot: starting" 2>/dev/null
++        ( mu300-power wake ) </dev/null >/dev/null 2>&1 &
++        continue
 +    fi
 +    # a held power key shuts down instead
 +    [ "$code $kind" = "$KEY_POWER long" ] || ( mu300-power wake "$key" ) </dev/null >/dev/null 2>&1 &
@@ -1314,7 +1244,7 @@ index 0000000..ec0d405
 +    esac
 +done; wait; }
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
-new file mode 100644
+new file mode 100755
 index 0000000..ea2cc58
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-lancheck
@@ -1420,69 +1350,58 @@ index 0000000..ea2cc58
 +say "br-lan=[$br] ports=[$ports] wlan0=$wst dnsmasq=[$dm] tcp22=$l22 tcp80=$l80 udp67=$l67 fw-jump=$fwlan range=[$rng]"
 \ No newline at end of file
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-led b/openwrt/vendor-extra/opt/mu300/bin/mu300-led
-new file mode 100644
-index 0000000..a1252ea
+new file mode 100755
+index 0000000..08d2aec
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-led
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,407 @@
 +#!/bin/sh
 +# The device's LEDs by what they mean, so the services need not know which device they run on.
-+#   mu300-led power on|off      Linux is up (set at boot, which also wakes the LEDs; cleared at shutdown)
++#   mu300-led power on|off      Linux is up (set at boot, which also wakes the LEDs; cleared at shutdown); the U30
++#                               Air's battery LED comes on with it and goes off at shutdown
 +#   mu300-led data on|5g|off|error  mobile data connected (5g: over 5G) / not connected / no service (no SIM, not
-+#                               registered)
-+#   mu300-led wifi on|off|sync [S]  the Wi-Fi hotspot is up (U30 Air: blue on 5 GHz, white on 2.4 GHz); sync: whatever
++#                               registered); U30 Air: the colour is the SIM in use, not 4G/5G (below)
++#   mu300-led data switching 0|1  U30 Air: a live SIM switch to that slot is under way (mu300-sim-u30): its colour
++#                               blinks until the next "data on|5g", or "data off|error" once the switch is over
++#   mu300-led wifi on|off|sync [S]  the Wi-Fi hotspot is up (U30 Air: white on 5 GHz, blue on 2.4 GHz); sync: whatever
 +#                               wlan0 is now, and again every 2 s for S seconds (OpenWrt: LuCI or the button)
-+#   mu300-led flash             the colour that is lit flashes KEY_FLASH_COUNT times and settles again: a key that
-+#                               acted says so at a glance, while the change it made is still on its way (mu300-buttons)
++#   mu300-led events            OpenWrt: the Wi-Fi LED follows hostapd on ubus as it comes and goes (a service, no
++#                               polling: wifi down/up, LuCI, the panel, a WCN reset, a hostapd that died)
 +#   mu300-led wake              show the LEDs again, for LED_TIMEOUT seconds (every key press, mu300-buttons); also
 +#                               in mu300-power's idle, for LED_TIMEOUT (60 s when it is 0): a key always shows life
 +#   mu300-led sleep [--if-due]  dark now (--if-due: only once the timeout has passed; mu300-buttons asks)
 +#   mu300-led idle on|off       mu300-power's idle: everything dark whatever LED_TIMEOUT says, except for a key's wake;
 +#                               state changes are remembered and shown on the next wake or at idle off
-+#   mu300-led charge on|off     the charging boot: the power LED blinks (1 s on, 1 s off)
++#   mu300-led charge on|off     the charging boot: the power LED blinks (1 s on, 1 s off); the U30 Air's battery LED
++#                               shows the charge as always
++#   mu300-led battery           U30 Air: the battery LED as the battery is now (also at every tick)
++#   mu300-led tick              mu300-buttons, every 5 s: the battery LED, then sleep --if-due
 +#   mu300-led test              each LED in turn, 2 s each, with its name (to tell which one is where)
 +#   mu300-led alarm on|off      too hot (thermal-guard): the PMIC's RGB LED flashes red, white, blue one at a time
 +#                               like a siren, also while the others are dark
++#   mu300-led flash             the colour that is lit flashes LED_KEY_FLASH_COUNT times and settles again: a key
++#                               that acted says so (V50: the one key switches the band, and the reload that follows
++#                               takes seconds, so the new colour is a while away)
 +# ZTE F50 (read from its Android): network = the PMIC's RGB LED, blue on 4G, white (its "green" channel) on 5G, red
 +#   without service; Wi-Fi = the PMIC's keypad backlight sink ("keyboard-backlight"), at ZTE's 48 of 127, whichever
 +#   band. No power LED. ZTE U30 Air (found by lighting each one):
-+#   battery  the PMIC's RGB LED: its "green" channel is white (power: Linux is up), red, blue
-+#   network  as ZTE's firmware: blue on 4G (a GPIO, net_blue), white on 5G (LDO VDDCAMA0), red without service
-+#            (the PMIC's keypad backlight sink, "keyboard-backlight" under 5.4 and mainline)
-+#   Wi-Fi    white: LDO VDDCAMA1 (2.4 GHz); blue: LDO VDDCAMA2 (5 GHz)
-+# ZTE V50: the F50's hardware with a device of its own, so the one network LED carries a second scheme (LED_SCHEME=v50)
-+#   instead of the F50's "which data is up": red without service, white on 5 GHz, blue on 2.4 GHz. No band and no
-+#   network together decide a colour anywhere else, so they decide it in one place here: render(). Two states, both
-+#   read from the outside (a network event and the band), one colour out. keyboard-backlight stays what it was - it
-+#   is a white lamp, no other colour to be had, and this scheme only takes the RGB LED.
++#   battery  the PMIC's RGB LED: its "green" channel is white, red, blue. As ZTE's firmware (FINDINGS 151): white
++#            at 60 % and above, blue from 10 %, red below; steady on the battery, breathing while it charges (the
++#            PMIC's own curve, 2 s), steady white when full on the charger. On outside power no LED times out; below
++#            10 % on the battery the red one does not either. The heat alarm goes over it.
++#   network  as ZTE's firmware: the SIM in use, not the access technology (FINDINGS 154): white for slot 0, the
++#            nano-SIM (LDO VDDCAMA0), blue for slot 1, the built-in eSIM (a GPIO, net_blue), red without service
++#            (the PMIC's keypad backlight sink, "keyboard-backlight" under 5.4 and mainline); the slot is this boot's
++#            pin, /run/mu300/sim-slot (slot 1 only where it is supported: OpenWrt), so a live switch recolours it
++#   Wi-Fi    as ZTE's firmware: white on 5 GHz (LDO VDDCAMA1), blue on 2.4 GHz (LDO VDDCAMA2) (FINDINGS 152)
 +# The LDO ones are zte-ldo0..2 under mainline (leds-zte-ldo) and vddcama0..2_status of ZTE's zte_ldo_leds under
 +# 5.4; the other GPIO LEDs in its device tree (net_red, net_green, net_white, pwr_green, wifi_*) light nothing,
 +# under Android too.
 +# The device comes from mu300-device; an LED this device has not is skipped.
 +#
-+# The V50's panel LEDs are not in /sys/class/leds at all: they are an Awinic AW9523B on i2c-3, and the vendor
-+# aw9523b.ko cannot be carried over to this kernel (its vermagic is the stock Android 5.4 build, and modversions
-+# is on). So with LED_BACKEND=i2c the V50 writes the chip itself, from userspace, with i2cset - LED_SCHEME=v50
-+# stays on top of that and nothing else changes. Two things make this cheap:
-+#   - the chip's 16 dimming registers 0x20-0x2F are consecutive, and the panel takes one I2C block write, so a
-+#     whole repaint is a single i2cset. That is why a colour change does not have to clear the other channels
-+#     first: the burst sets all sixteen at once and cannot leave two colours mixed.
-+#   - the registers are NOT in pin order (0x20..0x2F hold pins 8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a
-+#     colour is a bitmask over the register, not a range of it. The masks come from the stock vendor device tree
-+#     (aw9523b,idx) and were checked against the panel by eye; they are in led.conf so a board that wired the
-+#     chip differently can be corrected without a rebuild.
-+# The current range is GCR 0x11 bits [1:0] (IMAX = 37 mA, then 3/4, 1/2, 1/4). The V50 runs at 1/2 - LED_I2C_GCR.
-+#
 +# Timeout: /etc/mu300/led.conf, LED_TIMEOUT=SECONDS (0: always on). Default 60 on the U30 Air, which has a power
 +# button to wake them, and 0 on the F50. What each LED should show is kept in /run/mu300/led, so a change while
 +# the LEDs are dark shows up on the next wake.
-+# The v50 scheme, all in the same file: LED_SCHEME=classic (the default, every device that is not a V50) or v50;
-+# NO_NET_CHANNEL / NET5_CHANNEL / NET24_CHANNEL (which channel each of the three colours is on); KEY_FLASH_COUNT
-+# (flash, default 2); LED_LEVEL (per cent of max_brightness, to turn a channel down without changing the file).
-+# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR, the three colour
-+# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F) and
-+# LED_AW_WHITE_LEVEL. "white" is not a mask of its own - it is all three, which is why it needs no entry, and why
-+# it needs its own percentage: three emitters at once read about three times as bright as one.
 +# Every write is best effort: the PMIC rejects a brightness write now and then (mobile-data), and a cosmetic
 +# LED must never make a service fail.
 +# (MU300_SYSROOT, MU300_BIN and MU300_LED_CONF are for tests/: a fake /, this directory, a led.conf)
@@ -1491,57 +1410,40 @@ index 0000000..a1252ea
 +STATE=$R/run/mu300/led
 +DEVICE=$(${MU300_BIN:-/opt/mu300/bin}/mu300-device)
 +
++# ZTE V50 (experimental; kano's mapping, read from its Android driver and lit one group at a time, FINDINGS 95): an
++#   AW9523B on I2C3 drives three lamps, each white, blue and red (mainline's leds-aw9523b, port/drivers/leds):
++#   the network LED is the lamp of the SIM in use, as ZTE's firmware (V50 B15, NotificationManagerService.setNetLight,
++#   read by kanoqwq; FINDINGS 199): logical slot 0 (SIM1: built-in card 1 or the external card) lights NET2, slot 1
++#   (SIM2: built-in card 2 or 3) NET1, blue on 4G, white on 5G, red without service; the other lamp stays dark. The
++#   slot is this boot's pin, /run/mu300/sim-slot, as the AT daemons read it. Wi-Fi white on 5 GHz, blue on 2.4 GHz.
++#   The PMIC's LEDs exist in its device tree as well, but are not its front panel: never written here. Under 5.4
++#   the V50 has no driver for them: every LED is skipped.
++BY_SIM=0
++V50_NET=net2
++[ "$(cat "$R/run/mu300/sim-slot" 2>/dev/null)" != 1 ] || V50_NET=net1
 +case $DEVICE in
-+    u30air) POWER=sc27xx:green DATA=net_blue DATA5G=zte-ldo0 NODATA=keyboard-backlight WIFI5=zte-ldo2 WIFI24=zte-ldo1
-+            DEFAULT_TIMEOUT=60 ;;
++    u30air) POWER=sc27xx:green DATA=net_blue DATA5G=zte-ldo0 NODATA=keyboard-backlight WIFI5=zte-ldo1 WIFI24=zte-ldo2
++            DEFAULT_TIMEOUT=60 BY_SIM=1 ;;   # DATA is slot 1's colour here, DATA5G slot 0's (BY_SIM)
++    v50)    POWER= DATA=v50:$V50_NET:blue DATA5G=v50:$V50_NET:white NODATA=v50:$V50_NET:red WIFI5=v50:wifi:white
++            WIFI24=v50:wifi:blue DEFAULT_TIMEOUT=0 ;;
 +    *)      POWER= DATA=sc27xx:blue DATA5G=sc27xx:green NODATA=sc27xx:red WIFI5=keyboard-backlight
 +            WIFI24=keyboard-backlight DEFAULT_TIMEOUT=0 ;;
 +esac
 +# the PMIC's RGB LED on both (the U30 Air's battery LED, the F50's network LED), one colour at a time: the white
-+# outshines the others when mixed
++# outshines the others when mixed; the V50's network lamp
 +SIREN="sc27xx:red sc27xx:green sc27xx:blue"
++[ "$DEVICE" != v50 ] || SIREN="v50:$V50_NET:red v50:$V50_NET:white v50:$V50_NET:blue"
 +SIREN_PID=$R/run/mu300/led-siren.pid
-+LED_CONF=${MU300_LED_CONF:-/etc/mu300/led.conf}
-+conf() {  # conf KEY: its value in led.conf, the last one set (a line is read only up to the '=')
-+    sed -n "s/^$1=//p" "$LED_CONF" 2>/dev/null | tail -n1
-+}
-+TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$LED_CONF" 2>/dev/null | tail -n1)
++# the U30 Air's battery LED is the battery's (FINDINGS 151), not a "Linux is up" light any more: the three PMIC
++# channels are drawn by battery_show, never through the state files of the other LEDs
++BATTERY_LED=
++[ "$DEVICE" != u30air ] || { BATTERY_LED=1; POWER=; }
++PSY=$R/sys/class/power_supply
++TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
 +TIMEOUT=${TIMEOUT:-$DEFAULT_TIMEOUT}
-+
-+# The v50 scheme (LED_SCHEME=v50), off unless a V50 asks for it: the RGB LED then shows the network and the band
-+# instead of the data alone. Its colours default to the channels this device already uses for its network LED
-+# (red without service, white on 5G, blue on 4G) - the same lamp, given a second thing to say.
-+SCHEME=$(conf LED_SCHEME)
-+[ "$SCHEME" = v50 ] || SCHEME=classic
-+NO_NET=$(conf NO_NET_CHANNEL); NO_NET=${NO_NET:-$NODATA}
-+NET5=$(conf NET5_CHANNEL); NET5=${NET5:-$DATA5G}
-+NET24=$(conf NET24_CHANNEL); NET24=${NET24:-$DATA}
-+KEY_FLASH_COUNT=$(conf KEY_FLASH_COUNT)
++# how often a key's "I heard that" flash blinks (LED_KEY_FLASH_COUNT in led.conf, default 2)
++KEY_FLASH_COUNT=$(sed -n 's/^LED_KEY_FLASH_COUNT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
 +case $KEY_FLASH_COUNT in ''|*[!0-9]*) KEY_FLASH_COUNT=2 ;; esac
-+LED_LEVEL=$(conf LED_LEVEL)
-+case $LED_LEVEL in ''|*[!0-9]*) LED_LEVEL=100 ;; esac
-+SCHEME_LEDS=    # what LED_LEVEL applies to: the v50 scheme's channels, or nothing at all
-+[ "$SCHEME" = v50 ] && SCHEME_LEDS="$NO_NET $NET5 $NET24"
-+
-+# The V50's panel: an AW9523B over i2c-3, driven here from userspace because the vendor aw9523b.ko belongs to the
-+# stock Android kernel and cannot be loaded into this one. Off unless a device says LED_BACKEND=i2c, so nothing
-+# else on any board is affected by any of it.
-+LED_BACKEND=$(conf LED_BACKEND)
-+AW_BUS=$(conf LED_I2C_BUS); AW_ADDR=$(conf LED_I2C_ADDR); AW_GCR=$(conf LED_I2C_GCR)
-+AW_RED=$(conf LED_AW_RED); AW_GREEN=$(conf LED_AW_GREEN); AW_BLUE=$(conf LED_AW_BLUE)
-+AW_WHITE_LEVEL=$(conf LED_AW_WHITE_LEVEL)
-+case $AW_WHITE_LEVEL in ''|*[!0-9]*) AW_WHITE_LEVEL=100 ;; esac
-+aw_panel() { [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ -e "$R/dev/i2c-$AW_BUS" ]; }
-+# i2c_dev is a module here and nothing else on the system asks for it - it loads with a zero refcount and stays
-+# that way. Without /dev/i2c-N the scheme would have no way to reach the chip and the panel would simply stay dark,
-+# with no error anywhere: the worst way for a cosmetic feature to fail. Skipped under MU300_SYSROOT, where tests
-+# run against a fake / and there is no module to load.
-+if [ -z "$R" ] && [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ ! -e "/dev/i2c-$AW_BUS" ]; then
-+    modprobe i2c-dev 2>/dev/null || true
-+fi
-+AW_COLOURS="aw:red aw:green aw:blue aw:white"
-+# the siren is the panel's own colours on the V50, the PMIC's RGB channels everywhere else
-+if aw_panel; then SIREN="aw:red aw:green aw:blue"; fi
 +
 +uptime_s() { cut -d. -f1 "$R/proc/uptime" 2>/dev/null || echo 0; }
 +before() {  # before FILE: the uptime in FILE has not come yet
@@ -1549,7 +1451,9 @@ index 0000000..a1252ea
 +    case $until in ''|*[!0-9]*) return 1 ;; esac
 +    [ "$(uptime_s)" -lt "$until" ]
 +}
-+awake() { [ "$TIMEOUT" = 0 ] || before "$STATE/.awake-until"; }
++# on outside power (the U30 Air's charger) nothing times out, as under ZTE's firmware
++plugged() { [ "$(cat "$STATE/.plugged" 2>/dev/null)" = 1 ]; }
++awake() { [ "$TIMEOUT" = 0 ] || plugged || before "$STATE/.awake-until"; }
 +vendor_ldo() {  # vendor_ldo zte-ldoN: the 5.4 kernel's switch for that LDO, if there
 +    case $1 in zte-ldo[0-9]) ;; *) return 1 ;; esac
 +    for f in "$R"/sys/devices/platform/*zte*ldo*leds*/vddcama${1#zte-ldo}_status; do [ -e "$f" ] && { echo "$f"; return 0; }; done
@@ -1559,119 +1463,60 @@ index 0000000..a1252ea
 +# Lit now? Awake as usual; in idle only for a key's wake (.peek-until). The incident of 2026-10-07: idle on, and every
 +# key press was swallowed by it - a device dark for hours that looked powered off. A key must always show life.
 +shown() { if idle; then before "$STATE/.peek-until"; else awake; fi; }
-+has_led() {
-+    case $1 in
-+        aw:*) aw_panel ;;
-+        *)    [ -e "$LEDS/$1" ] || vendor_ldo "$1" >/dev/null ;;
-+    esac
-+}
++has_led() { [ -e "$LEDS/$1" ] || vendor_ldo "$1" >/dev/null; }
 +level() {  # level NAME: its brightness when lit (ZTE lights the F50's Wi-Fi LED at 48: a low-current sink)
-+    case $1 in
-+        # the panel's dimming registers run 0-255; LED_LEVEL scales the same 0-255 as any other channel
-+        aw:*) echo 255 ;;
-+        *)    case $DEVICE:$1 in f50:keyboard-backlight) echo 48 ;; *) cat "$LEDS/$1/max_brightness" 2>/dev/null ;; esac ;;
-+    esac
++    case $DEVICE:$1 in f50:keyboard-backlight) echo 48 ;; *) cat "$LEDS/$1/max_brightness" 2>/dev/null ;; esac
 +}
-+aw_mask() {  # aw_mask NAME: which of the 16 dimming registers belong to this colour, as a bitmask
-+    case $1 in
-+        aw:red)   echo "$AW_RED" ;;
-+        aw:green) echo "$AW_GREEN" ;;
-+        aw:blue)  echo "$AW_BLUE" ;;
-+        # red+green+blue on the same LEDs is white, and it is all sixteen bits - that is the whole reason white
-+        # needs no mask of its own and cannot come out half-lit
-+        aw:white) echo 0xffff ;;
-+        *)        echo 0 ;;
-+    esac
-+}
-+aw_write() {  # aw_write NAME LEVEL: repaint the whole panel with one I2C block write
-+    _m=$(aw_mask "$1") || return 0
-+    case $_m in ''|*[!0-9a-fA-Fx]*) return 0 ;; esac
-+    _v=$2
-+    # White is not a fourth colour, it is all three at once, so the light adds up. Each LED still carries only its
-+    # own channel's current - the red beads take exactly as much showing white as showing red - but the eye sees
-+    # three emitters instead of one, and at the same DIM white reads about three times as bright as a single
-+    # colour. Scaling white's own DIM is the only knob that helps, and it scales all three together: white can be
-+    # brought level with a single colour but never exactly equal to it. Chosen by eye on this panel, 2026-10-11:
-+    # 50% sits level with blue and still reads as white.
-+    case $1 in aw:white) _v=$(( _v * AW_WHITE_LEVEL / 100 )) ;; esac
-+    _b=
-+    for _i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-+        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $_v"; else _b="$_b 0"; fi
-+    done
-+    # GCR first: it sets the current range, and it must not be lost across a repaint. Best effort throughout, as
-+    # everywhere else here - a cosmetic LED must never make a service fail.
-+    [ -n "$AW_GCR" ] && i2cset -f -y "$AW_BUS" "$AW_ADDR" 0x11 "$AW_GCR" 2>/dev/null
-+    i2cset -f -y "$AW_BUS" "$AW_ADDR" 0x20 $_b i 2>/dev/null
-+    return 0
-+}
-+lit() {  # lit NAME: level NAME, turned down by LED_LEVEL when it is one of the v50 scheme's channels. That scheme
-+        # lights one channel at a time and never mixes two, so a field calibration of a colour that came out too
-+        # bright (or too dim) belongs here - with no rebuild, and no other device's LEDs touched.
-+    _lt_v=$(level "$1")
-+    if [ "$LED_LEVEL" != 100 ]; then
-+        case " $SCHEME_LEDS " in
-+            *" $1 "*) [ -n "$_lt_v" ] && _lt_v=$((_lt_v * LED_LEVEL / 100)) ;;
-+        esac
++write() {  # write NAME 0|1|blink: the LED itself (blink: the timer trigger, 0.5 s on, 0.5 s off; steady without one)
++    if [ "$2" = blink ]; then
++        if [ -w "$LEDS/$1/trigger" ] && echo timer > "$LEDS/$1/trigger" 2>/dev/null; then
++            echo 500 > "$LEDS/$1/delay_on" 2>/dev/null
++            echo 500 > "$LEDS/$1/delay_off" 2>/dev/null
++            return 0
++        fi
++        set -- "$1" 1   # the 5.4 kernel's LDO switches: on or off
 +    fi
-+    echo "$_lt_v"
-+}
-+write() {  # write NAME 0|1: the LED itself
-+    case $1 in
-+        aw:*)
-+            aw_panel || return 0
-+            if [ "$2" = 1 ]; then aw_write "$1" "$(lit "$1")"; else aw_write "$1" 0; fi
-+            return 0 ;;
-+    esac
 +    if [ ! -e "$LEDS/$1" ] && f=$(vendor_ldo "$1"); then echo "$2" > "$f" 2>/dev/null; return 0; fi
 +    [ -w "$LEDS/$1/brightness" ] || return 0
 +    echo none > "$LEDS/$1/trigger" 2>/dev/null
-+    if [ "$2" = 1 ]; then lit "$1"; else echo 0; fi > "$LEDS/$1/brightness" 2>/dev/null
++    if [ "$2" = 1 ]; then level "$1"; else echo 0; fi > "$LEDS/$1/brightness" 2>/dev/null
 +    return 0
 +}
-+set_led() {  # set_led NAME 0|1: what it should show; lit only while awake
++set_led() {  # set_led NAME 0|1|blink: what it should show; lit only while awake
 +    [ -n "$1" ] || return 0
 +    has_led "$1" || return 0
-+    # the panel is one lamp, not three: only the colour it is showing may be remembered. Every write repaints all
-+    # sixteen registers, so a second remembered colour would not stack - it would overwrite, and whichever came
-+    # last in the directory order would win, not whichever the scheme chose.
-+    case $1 in aw:*) rm -f "$STATE"/aw:* 2>/dev/null ;; esac
 +    mkdir -p "$STATE" 2>/dev/null && echo "$2" > "$STATE/$1" 2>/dev/null
-+    if [ "$2" = 1 ] && ! shown; then write "$1" 0; else write "$1" "$2"; fi
++    if [ "$2" != 0 ] && ! shown; then write "$1" 0; else write "$1" "$2"; fi
 +}
++# The U30 Air's network LED by the SIM in use (FINDINGS 154). The slot is this boot's pin, the file the AT daemons
++# and mobile-data read too; it is never created here (that would pin a slot before mu300-atd chose one). A 1 counts
++# only where slot 1 is supported (the U30 Air on OpenWrt, as mu300-sim says): anywhere else every reader uses slot 0.
++sim_slot() {
++    s=$(cat "$R/run/mu300/sim-slot" 2>/dev/null)
++    if [ "$s" = 1 ] && [ -e "$R/etc/openwrt_release" ]; then echo 1; else echo 0; fi
++}
++sim_led() { if [ "$1" = 1 ]; then echo "$DATA"; else echo "$DATA5G"; fi; }   # sim_led SLOT: its colour
++network() {  # network NAME|'' VALUE: NAME shows VALUE, the network LED's other colours go dark
++    for l in "$NODATA" "$DATA" "$DATA5G"; do [ "$l" = "$1" ] || set_led "$l" 0; done
++    [ -z "$1" ] || set_led "$1" "$2"
++}
++# a live SIM switch's blink stays through the hang-up it causes (netifd tears the old connection down whenever it
++# gets to it): only while the switch is still under way, and only one that was announced here
++switching() { [ "$BY_SIM" = 1 ] && [ -e "$R/run/mu300/sim-switching" ] && [ -e "$STATE/.switch-to" ]; }
 +wifi_band() {  # 5 or 2.4: the channel the hotspot runs on, else (it has none yet, just started) its setting
 +    ch=$(iw dev wlan0 info 2>/dev/null | sed -n 's/.*channel \([0-9]*\).*/\1/p' | head -n1)
 +    if [ -n "$ch" ]; then [ "$ch" -gt 14 ] && echo 5 || echo 2.4
 +    else "${MU300_BIN:-/opt/mu300/bin}/mu300-wifi-band" 2>/dev/null | sed -n 's/^hotspot: \([0-9.]*\) GHz$/\1/p'; fi
 +}
-+v50() { [ "$SCHEME" = v50 ]; }
-+net() {  # net up|down|noservice: what the data events last said, then the colour that goes with it
-+    mkdir -p "$STATE" 2>/dev/null
-+    echo "$1" > "$STATE/.net" 2>/dev/null
-+    render
-+}
-+# render(): the v50 scheme's whole reason to exist. One colour out of two states, in one place, because the states
-+# are two separate streams: the network arrives as events from mobile-data, the band only by being looked up, and
-+# each command can change one of them without the other. Lit as it should be (only while awake), so the state
-+# machine above carries it like every other LED.
-+# The network wins over the band: red without service whatever the band is, because that is the one state a person
-+# has to do something about. Only "up" (a connected data bearer) counts as a network - not a ping of the outside,
-+# which would cost traffic and say nothing the modem did not already know.
-+render() {
-+    v50 || return 0
-+    if [ "$(cat "$STATE/.net" 2>/dev/null)" = up ]; then
-+        if [ "$(wifi_band)" = 5 ]; then _ron=$NET5; else _ron=$NET24; fi
-+    else _ron=$NO_NET; fi
-+    case $_ron in
-+        # the panel is repainted in one write of all sixteen registers, so clearing the other colours first would
-+        # only buy a black frame between them - the write that lights the new colour has already cleared the rest
-+        aw:*) ;;
-+        *) for _rl in $SCHEME_LEDS; do [ "$_rl" = "$_ron" ] || set_led "$_rl" 0; done ;;
-+    esac
-+    set_led "$_ron" 1
-+    mkdir -p "$STATE" 2>/dev/null && echo "$_ron" > "$STATE/.color" 2>/dev/null
-+    return 0
++# hostapd's access point on wlan0, as ubus has it: on while its object is there and not DISABLED (one still setting
++# up, ACS or a DFS wait, is on its way). iw is no help at that moment: when hostapd's object goes away, iw still
++# shows the SSID of the access point being torn down.
++hostapd_state() {
++    st=$(ubus call hostapd.wlan0 get_status 2>/dev/null | sed -n 's/.*"status": *"\([A-Z_]*\)".*/\1/p' | head -n1)
++    case $st in ''|DISABLED) echo off ;; *) echo on ;; esac
 +}
 +show_all() {  # every LED as it should be (none while idle, unless a key woke them)
++    battery_show
 +    shown || return 0
 +    for f in "$STATE"/*; do
 +        [ -f "$f" ] || continue
@@ -1679,30 +1524,120 @@ index 0000000..a1252ea
 +    done
 +}
 +siren_running() { p=$(cat "$SIREN_PID" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
-+nap() {  # nap SECONDS: a short pause - a quarter of a second for the siren, a fraction for a flash.
-+    # Not every sleep here takes a fraction: OpenWrt's own busybox on this device answers "sleep: invalid number"
-+    # and stops, so a bare `sleep 0.25` silently becomes a whole second - the siren holds each colour four times
-+    # as long as it means to, and a key's "I heard that" flash takes four seconds to say it. The release's own
-+    # busybox is built with FANCY_SLEEP and does take it, so ask that one first; where it is not there, the
-+    # system's sleep is tried anyway, and a whole second is the last resort. (MU300_BB is for tests/.)
-+    _nb=${MU300_BB:-/opt/mu300/bin/busybox}
-+    if [ -x "$_nb" ]; then "$_nb" sleep "$1" 2>/dev/null && return 0; fi
-+    sleep "$1" 2>/dev/null || sleep 1
++
++# --- the U30 Air's battery LED (FINDINGS 151): ZTE's services.jar ZteBatteryService and its lights HAL
++# ZTE's levels: white (the green channel) 120, blue 200, red 150 of 255
++battery_level() { case $1 in green) echo 120 ;; blue) echo 200 ;; red) echo 150 ;; esac; }
++# battery_read: "COLOUR MODE LOW PLUGGED" from the fuel gauge (mainline sc27xx-fgu, the 5.4 kernel's "battery") and
++# the charger (bq256xx-charger, or the 5.4 kernel's usb/ac); nothing without a capacity
++battery_read() {
++    _b=
++    for _d in "$PSY/sc27xx-fgu" "$PSY/battery"; do [ -r "$_d/capacity" ] && { _b=$_d; break; }; done
++    [ -n "$_b" ] || return 1
++    _cap=$(cat "$_b/capacity" 2>/dev/null); _st=$(cat "$_b/status" 2>/dev/null)
++    case $_cap in ''|*[!0-9]*) return 1 ;; esac
++    # outside power: the charger's online flag, when there is one. The gauge says "Charging" for a while after
++    # an unplug (kano saw it), so its status alone counts only where no charger says anything
++    _on=
++    for _d in "$PSY/bq256xx-charger" "$PSY/usb" "$PSY/ac"; do
++        _o=$(cat "$_d/online" 2>/dev/null) || continue
++        [ "$_o" = 1 ] && { _on=1; break; }
++        _on=0
++    done
++    [ -n "$_on" ] || case $_st in Charging|Full) _on=1 ;; *) _on=0 ;; esac
++    if [ "$_cap" -ge 60 ]; then _col=green; elif [ "$_cap" -ge 10 ]; then _col=blue; else _col=red; fi
++    _mode=steady; [ "$_on" = 1 ] && [ "$_st" = Charging ] && _mode=breathe
++    _low=0; [ "$_on" = 0 ] && [ "$_cap" -lt 10 ] && _low=1
++    echo "$_col $_mode $_low $_on"
 +}
++# battery_show: the three channels as .battery says, lit while the LEDs are shown (and, below 10 % on the battery,
++# always); written only when that changes, so the breathing is not restarted every tick. The heat alarm's siren
++# owns the channels while it runs.
++battery_show() {
++    [ -n "$BATTERY_LED" ] || return 0
++    siren_running && return 0
++    _bc= _bm= _bl=
++    [ ! -r "$STATE/.battery" ] || read -r _bc _bm _bl < "$STATE/.battery"
++    _bw=off
++    if [ -n "$_bc" ] && [ ! -e "$STATE/.battery-off" ] && { [ "$_bl" = 1 ] || shown; }; then _bw="$_bc $_bm"; fi
++    [ "$_bw" != "$(cat "$STATE/.battery-shown" 2>/dev/null)" ] || return 0
++    for _c in red green blue; do
++        [ -w "$LEDS/sc27xx:$_c/brightness" ] || continue
++        if [ "$_bw" = "$_c steady" ]; then write_level "sc27xx:$_c" "$(battery_level $_c)"
++        elif [ "$_bw" = "$_c breathe" ]; then breathe "sc27xx:$_c" "$(battery_level $_c)"
++        else write "sc27xx:$_c" 0; fi
++    done
++    mkdir -p "$STATE" 2>/dev/null && echo "$_bw" > "$STATE/.battery-shown"
++}
++write_level() {  # write_level NAME LEVEL: steady at LEVEL
++    echo none > "$LEDS/$1/trigger" 2>/dev/null
++    echo "$2" > "$LEDS/$1/brightness" 2>/dev/null
++    return 0
++}
++# breathe NAME LEVEL: ZTE's charging light, 800 ms on and 1200 ms off, which its HAL hands the PMIC as a curve:
++# rise 2/5 of on, high 3/5, fall 2/5 of off, low 3/5 (the pattern trigger's hw_pattern); a timer blink without it
++# From a steady light the brightness goes to 0 first: the SC27xx's pattern_set sets RUN without clearing the steady
++# TYPE bit, and the pattern trigger's switch does not always call pattern_clear, so the LED stayed steady with both
++# bits set (kanoqwq read 0x300 in the PMIC's 0x180 on a U30 Air; 0x100 with this). A channel already on the pattern
++# trigger is left as it is.
++breathe() {
++    if grep -qw pattern "$LEDS/$1/trigger" 2>/dev/null; then
++        if ! grep -q '\[pattern\]' "$LEDS/$1/trigger" 2>/dev/null; then
++            echo 0 > "$LEDS/$1/brightness" 2>/dev/null
++            echo pattern > "$LEDS/$1/trigger" 2>/dev/null
++        fi
++        echo -1 > "$LEDS/$1/repeat" 2>/dev/null
++        echo "$2 320 $2 480 $2 480 $2 720" > "$LEDS/$1/hw_pattern" 2>/dev/null && return 0
++    fi
++    echo timer > "$LEDS/$1/trigger" 2>/dev/null
++    echo 800 > "$LEDS/$1/delay_on" 2>/dev/null
++    echo 1200 > "$LEDS/$1/delay_off" 2>/dev/null
++    echo "$2" > "$LEDS/$1/brightness" 2>/dev/null
++    return 0
++}
++# battery_update: read the battery, remember it, and show it. Unplugged: the timeout starts again from now (ZTE's
++# 15 s after an unplug; LED_TIMEOUT here); plugged in: everything lit, and it stays lit.
++battery_update() {
++    [ -n "$BATTERY_LED" ] || return 0
++    _now=$(battery_read) || return 0
++    mkdir -p "$STATE" 2>/dev/null || return 0
++    _was=$(cat "$STATE/.plugged" 2>/dev/null)
++    _p=${_now##* }
++    echo "$_p" > "$STATE/.plugged"
++    echo "${_now% *}" > "$STATE/.battery"
++    if [ "$_was" = 1 ] && [ "$_p" = 0 ] && [ "$TIMEOUT" != 0 ]; then
++        echo $(( $(uptime_s) + TIMEOUT )) > "$STATE/.awake-until"
++    fi
++    if [ "$_p" = 1 ] && [ "$_was" != 1 ]; then show_all; else battery_show; fi
++}
++nap() { sleep "$1" 2>/dev/null || sleep 1; }   # (a busybox without fractional sleep)
 +
 +case "$1 ${2:-}" in
-+    "power on")   set_led "$POWER" 1; [ "$TIMEOUT" = 0 ] || idle || exec "$0" wake ;;   # (a boot, not a key)
-+    "power off")  set_led "$POWER" 0 ;;
-+    "data on")    if v50; then net up; else set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA5G" 0; set_led "$DATA" 1; fi ;;
-+    "data 5g")    if v50; then net up; else set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA" 0; set_led "$DATA5G" 1; fi ;;
-+    "data off")   if v50; then net down; else set_led "$NODATA" 0; set_led "$DATA5G" 0; set_led "$DATA" 0; fi ;;
-+    "data error") if v50; then net noservice; else set_led "$DATA" 0; set_led "$DATA5G" 0; set_led "$NODATA" 1; fi ;;
++    "power on")   set_led "$POWER" 1; rm -f "$STATE/.battery-off"; battery_update
++                  [ "$TIMEOUT" = 0 ] || idle || exec "$0" wake ;;   # (a boot, not a key)
++    "power off")  set_led "$POWER" 0
++                  [ -z "$BATTERY_LED" ] || { mkdir -p "$STATE" 2>/dev/null; : > "$STATE/.battery-off"; battery_show; } ;;
++    "battery "*)  battery_update ;;
++    "tick "*)     battery_update; exec "$0" sleep --if-due ;;
++    "data on"|"data 5g")
++        rm -f "$STATE/.switch-to"
++        if [ "$BY_SIM" = 1 ]; then network "$(sim_led "$(sim_slot)")" 1
++        elif [ "$2" = 5g ]; then network "$DATA5G" 1
++        else network "$DATA" 1; fi ;;
++    "data off"|"data error")
++        switching && exit 0
++        rm -f "$STATE/.switch-to"
++        if [ "$2" = error ]; then network "$NODATA" 1; else network '' 0; fi ;;
++    "data switching")
++        [ "$BY_SIM" = 1 ] || exit 0   # (no other device switches SIMs live)
++        case ${3:-} in 0|1) ;; *) echo "mu300-led data switching: the slot is 0 or 1" >&2; exit 2 ;; esac
++        mkdir -p "$STATE" 2>/dev/null && echo "$3" > "$STATE/.switch-to" 2>/dev/null
++        network "$(sim_led "$3")" blink ;;
 +    "wifi on")
 +        if [ "$WIFI5" = "$WIFI24" ]; then set_led "$WIFI5" 1
 +        elif [ "$(wifi_band)" = 5 ]; then set_led "$WIFI24" 0; set_led "$WIFI5" 1
-+        else set_led "$WIFI5" 0; set_led "$WIFI24" 1; fi
-+        v50 && render ;;   # keyboard-backlight keeps meaning "the hotspot is up"; the RGB LED answers for the scheme
-+    "wifi off")   set_led "$WIFI5" 0; [ "$WIFI24" = "$WIFI5" ] || set_led "$WIFI24" 0; v50 && render ;;
++        else set_led "$WIFI5" 0; set_led "$WIFI24" 1; fi ;;
++    "wifi off")   set_led "$WIFI5" 0; [ "$WIFI24" = "$WIFI5" ] || set_led "$WIFI24" 0 ;;
 +    "wifi sync")  # a running AP has its SSID in iw's answer; a stopped hostapd leaves "type AP" without one
 +        # (a hotspot that LuCI turned on can take longer than any one moment to come up: S follows it a while)
 +        n=${3:-0} last=
@@ -1714,6 +1649,19 @@ index 0000000..a1252ea
 +            [ "$n" -gt 0 ] || break
 +            nap 2; n=$((n - 2))
 +        done ;;
++    "events "*)
++        # ubusd announces every object it adds and removes, and hostapd.wlan0 is there exactly while hostapd runs
++        # the access point. The state is read once the listener is up (nothing in between is missed), then at each
++        # of its events. The data LED stays mobile-data's (the dial, the hang-up, its watchdog).
++        command -v ubus >/dev/null 2>&1 || { echo "mu300-led events: needs ubus (OpenWrt)" >&2; exit 1; }
++        ubus listen ubus.object.add ubus.object.remove | {
++            last=$(hostapd_state); "$0" wifi "$last"
++            while IFS= read -r ev; do
++                case $ev in *'"hostapd.wlan0"'*) ;; *) continue ;; esac
++                s=$(hostapd_state)
++                [ "$s" = "$last" ] || { "$0" wifi "$s"; last=$s; }
++            done
++        } ;;
 +    "wake "*)
 +        mkdir -p "$STATE" 2>/dev/null
 +        now=$(uptime_s)
@@ -1722,8 +1670,7 @@ index 0000000..a1252ea
 +            echo $((now + t)) > "$STATE/.peek-until"
 +        fi
 +        [ "$TIMEOUT" = 0 ] || echo $((now + TIMEOUT)) > "$STATE/.awake-until"
-+        show_all
-+        v50 && render ;;   # the band can have changed while the LEDs were dark (a key, a sync): settle on it again
++        show_all ;;
 +    "sleep "*)
 +        if idle; then   # a key's wake in idle: dark again once it is over
 +            if [ "${2:-}" = --if-due ] && shown; then exit 0; fi
@@ -1735,26 +1682,31 @@ index 0000000..a1252ea
 +            [ -e "$STATE/.awake-until" ] || [ "${2:-}" != --if-due ] || exit 0   # dark already
 +        fi
 +        rm -f "$STATE/.awake-until"
-+        for f in "$STATE"/*; do [ -f "$f" ] && write "${f##*/}" 0; done ;;
++        for f in "$STATE"/*; do [ -f "$f" ] && write "${f##*/}" 0; done
++        battery_show ;;
 +    "idle on")
 +        mkdir -p "$STATE" 2>/dev/null
 +        : > "$STATE/.idle"
 +        rm -f "$STATE/.peek-until"
 +        for f in "$STATE"/*; do [ -f "$f" ] && write "${f##*/}" 0; done
-+        [ -z "$POWER" ] || write "$POWER" 0 ;;
++        [ -z "$POWER" ] || write "$POWER" 0
++        battery_show ;;
 +    "idle off")
 +        rm -f "$STATE/.idle" "$STATE/.peek-until"
-+        if awake; then show_all; v50 && render; fi ;;   # past the timeout they stay dark until the next wake
++        if awake; then show_all; fi ;;   # past the timeout they stay dark until the next wake
 +    "charge on")
++        # the U30 Air: its battery LED breathes while it charges anyway (battery_update)
++        [ -z "$BATTERY_LED" ] || { battery_update; exit 0; }
 +        [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
 +        echo timer > "$LEDS/$POWER/trigger" 2>/dev/null
 +        echo 1000 > "$LEDS/$POWER/delay_on" 2>/dev/null
 +        echo 1000 > "$LEDS/$POWER/delay_off" 2>/dev/null ;;
 +    "charge off")
++        [ -z "$BATTERY_LED" ] || { battery_update; exit 0; }
 +        [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
 +        echo none > "$LEDS/$POWER/trigger" 2>/dev/null
 +        write "$POWER" 0
-+        if awake; then show_all; v50 && render; fi ;;
++        if awake; then show_all; fi ;;
 +    "alarm on")
 +        siren_running && exit 0
 +        mkdir -p "${SIREN_PID%/*}" 2>/dev/null
@@ -1766,7 +1718,8 @@ index 0000000..a1252ea
 +        rm -f "$SIREN_PID"
 +        nap 0.2
 +        for l in $SIREN; do write "$l" 0; done
-+        if awake; then show_all; v50 && render; fi ;;   # the U30 Air's white is its power LED, the F50's colours its network LED
++        rm -f "$STATE/.battery-shown"    # the siren drew over it
++        show_all ;;   # the U30 Air's white is its power LED, the F50's colours its network LED
 +    "siren "*)   # (alarm on runs this in the background)
 +        # Only the siren named in the pid file runs: one left behind (its alarm switched off while it was
 +        # between writes, a restarted service) stops by itself instead of flashing along with the new one.
@@ -1778,57 +1731,57 @@ index 0000000..a1252ea
 +            elif [ $n -gt 0 ]; then exit 0; fi
 +            n=$((n + 1))
 +            for on in $SIREN; do
-+                case $on in
-+                    # one write turns the whole panel over to the next colour; the others need clearing by hand
-+                    aw:*) ;;
-+                    *) for l in $SIREN; do [ "$l" = "$on" ] || write "$l" 0; done ;;
-+                esac
++                for l in $SIREN; do [ "$l" = "$on" ] || write "$l" 0; done
 +                write "$on" 1; nap 0.25
 +            done
 +        done ;;
-+    "flash "*)   # a key acted: say so while the change it made is still on its way (a band switch reloads Wi-Fi, which
-+        # takes seconds, and the colour that answers for it comes with the new channel). Only the v50 scheme has a
-+        # colour to flash with; elsewhere a key's wake already lit everything.
-+        v50 || exit 0
++    "flash "*)   # a key acted: say so while the change it made is still on its way (a band switch reloads
++        # Wi-Fi, which takes seconds, and the colour that answers for it comes with the new channel).
++        # Only the V50 has one lamp carrying every state, so only it has a colour to flash.
++        [ "$DEVICE" = v50 ] || exit 0
 +        shown || exit 0   # dark is dark: a flash is not a reason to light a device that is meant to be dark
-+        _fl=$(cat "$STATE/.color" 2>/dev/null)
++        _fl=
++        for l in "$NODATA" "$DATA" "$DATA5G"; do
++            [ -n "$l" ] || continue
++            [ "$(cat "$STATE/$l" 2>/dev/null)" = 1 ] && { _fl=$l; break; }
++        done
 +        [ -n "$_fl" ] || exit 0
 +        _fi=0
 +        while [ "$_fi" -lt "$KEY_FLASH_COUNT" ]; do
 +            write "$_fl" 0; nap 0.15
 +            write "$_fl" 1; nap 0.15
 +            _fi=$((_fi + 1))
-+        done
-+        render ;;
++        done ;;
 +    "test "*)
 +        for l in "$LEDS"/*; do
 +            n=${l##*/}
-+            case $DEVICE:$n in *:mmc*) continue ;; f50:keyboard-backlight) ;; *:*backlight*) continue ;; esac
++            case $DEVICE:$n in *:mmc*) continue ;; f50:keyboard-backlight) ;; *:*backlight*) continue ;; v50:sc27xx:*) continue ;; esac
 +            old=$(cat "$l/brightness" 2>/dev/null)
 +            echo "$n"; write "$n" 1; sleep 2; echo "${old:-0}" > "$l/brightness" 2>/dev/null
 +        done ;;
-+    *) sed -n '2,12s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
++    *) sed -n '2,24s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
 +esac
 +exit 0
 diff --git a/openwrt/vendor-extra/opt/mu300/bin/mu300-wifi-band b/openwrt/vendor-extra/opt/mu300/bin/mu300-wifi-band
-new file mode 100644
-index 0000000..e9ff62e
+new file mode 100755
+index 0000000..dfd91d2
 --- /dev/null
 +++ b/openwrt/vendor-extra/opt/mu300/bin/mu300-wifi-band
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,65 @@
 +#!/bin/sh
 +# The hotspot's band (Ubuntu and OpenWrt). The chip runs one access point at a time, on 2.4 or on 5 GHz.
 +#   mu300-wifi-band            show it
 +#   mu300-wifi-band 2.4|5      switch to that band and restart the hotspot (kept across reboots)
 +#   mu300-wifi-band toggle     the other one (the U30 Air's Wi-Fi key, see mu300-buttons)
 +# The channel goes back to automatic: 5 GHz channels mean nothing on 2.4 GHz and the other way round.
-+# A switch tells mu300-led too, which shows the band in its v50 scheme (the V50's one LED says whether there is a
-+# network and which band at once); without a word from here the colour would still be the old band's until
-+# something else noticed.
-+# Ubuntu: BAND and CHANNEL in /etc/mu300/hotspot.conf (hotspot-start). OpenWrt: wireless.radio0 in UCI.
-+# (MU300_HOTSPOT_CONF is for tests/)
++# Ubuntu: BAND and CHANNEL in /etc/mu300/hotspot.conf (hotspot-start). OpenWrt: wireless.radio0 in UCI, on 5 GHz the
++# country's default channel without DFS and its channel list for auto (lib/wifi-channels.sh: no radar detection).
++# (MU300_HOTSPOT_CONF, MU300_SYSROOT and MU300_WIFI_CHANNELS are for tests/)
 +CONF=${MU300_HOTSPOT_CONF:-/etc/mu300/hotspot.conf}
-+is_openwrt() { [ -e /etc/openwrt_release ] && [ -z "${MU300_HOTSPOT_CONF:-}" ]; }
++WIFI_CHANNELS=${MU300_WIFI_CHANNELS:-/opt/mu300/lib/wifi-channels.sh}
++[ -r "$WIFI_CHANNELS" ] || WIFI_CHANNELS=$(dirname "$0")/../lib/wifi-channels.sh
++. "$WIFI_CHANNELS"
++is_openwrt() { [ -e "${MU300_SYSROOT:-}/etc/openwrt_release" ] && [ -z "${MU300_HOTSPOT_CONF:-}" ]; }
 +
 +current() {
 +    if is_openwrt; then
@@ -1843,11 +1796,23 @@ index 0000000..e9ff62e
 +
 +set_band() {  # set_band 2.4|5
 +    if is_openwrt; then
-+        if [ "$1" = 2.4 ]; then b=2g ch=6 ht=HT20; else b=5g ch=36 ht=VHT80; fi
++        if [ "$1" = 2.4 ]; then
++            b=2g ch=6 ht=HT20
++            chl='delete wireless.radio0.channels
++delete wireless.radio0.acs_exclude_dfs'
++        else
++            cc=$(uci -q get wireless.radio0.country); cc=${cc:-TR}
++            ch=$(wifi_ap5_default "$cc")
++            [ -n "$ch" ] || { echo "no 5 GHz channel without DFS in country $cc: the hotspot stays on 2.4 GHz" >&2; exit 1; }
++            b=5g ht=VHT$(wifi_ap5_width "$cc" "$ch")
++            chl="set wireless.radio0.channels='$(wifi_ap5_channels "$cc")'
++set wireless.radio0.acs_exclude_dfs='1'"
++        fi
 +        uci -q batch <<UCI
 +set wireless.radio0.band='$b'
 +set wireless.radio0.channel='$ch'
 +set wireless.radio0.htmode='$ht'
++$chl
 +commit wireless
 +UCI
 +        wifi reload >/dev/null 2>&1 &
@@ -1858,10 +1823,6 @@ index 0000000..e9ff62e
 +        new=$(sed -e "s/^BAND=.*/BAND=$1/" -e 's/^CHANNEL=.*/CHANNEL=auto/' "$CONF") && printf '%s\n' "$new" > "$CONF"
 +        [ -n "${MU300_HOTSPOT_CONF:-}" ] || systemctl restart mu300-hotspot >/dev/null 2>&1 &
 +    fi
-+    # The colour that answers for the band has to follow it (mu300-led's v50 scheme): nothing else is looking for
-+    # this change, and the reload above takes seconds - so it follows the hotspot as it comes back instead of
-+    # reading a band that is still the old one. In the background: a key press waits for this script, not for Wi-Fi.
-+    "${MU300_BIN:-/opt/mu300/bin}/mu300-led" wifi sync 30 </dev/null >/dev/null 2>&1 &
 +    echo "hotspot: $1 GHz"
 +}
 +
@@ -1873,11 +1834,11 @@ index 0000000..e9ff62e
 +    *) echo "usage: mu300-wifi-band [2.4|5|toggle]" >&2; exit 2 ;;
 +esac
 diff --git a/openwrt/vendor-extra/usr/libexec/unisoc-modem/dashboard-info b/openwrt/vendor-extra/usr/libexec/unisoc-modem/dashboard-info
-new file mode 100644
-index 0000000..ea88f33
+new file mode 100755
+index 0000000..90fb26f
 --- /dev/null
 +++ b/openwrt/vendor-extra/usr/libexec/unisoc-modem/dashboard-info
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,465 @@
 +#!/bin/sh
 +# mu300-dash-info -- the dashboard's system/network snapshot: ONE line of JSON on stdout.
 +#
@@ -1950,8 +1911,31 @@ index 0000000..ea88f33
 +DATA_IFACE6=$(safe_iface "$(cfg data_interface_v6)" wan6)
 +WANJSON=$(t3 ubus call "network.interface.$DATA_IFACE" status)
 +WAN6JSON=$(t3 ubus call "network.interface.$DATA_IFACE6" status)
-+DATA_DEVICE=$(safe_iface "$(cfg data_device)" '')
-+[ -n "$DATA_DEVICE" ] || DATA_DEVICE=$(safe_iface "$(jval "$WANJSON" l3_device)" sipa_eth0)
++SIM_SLOT=0
++# The SIM selector's own account, for the pages (issue #194): "slot" the card this boot uses, "wanted" the one the
++# configuration asks for, "slot1_supported" whether this device has the internal card at all. mu300-sim falls back to
++# slot 0 on a device without slot 1, and nothing said so: the home page and the interface page read it from here.
++# Local only (uci and a file under /run): no AT command. null without the selector, when status fails, or when
++# the U30 transaction reports active:null. A pinned routing slot is not proof of an observed active card.
++SIMBIN=${MU300_SIM_BIN:-/opt/mu300/bin/mu300-sim}
++SIM_JSON=null
++if [ -x "$SIMBIN" ]; then
++    SIM_SLOT=$("$SIMBIN" active) || exit 1
++    sim_status=$("$SIMBIN" status --json 2>/dev/null)
++    sim_n() { printf '%s\n' "$sim_status" | sed -n "s/.*\"$1\": *\([0-9]\).*/\1/p" | head -n1; }
++    sim_active=$(sim_n active); sim_wanted=$(sim_n default); sim_s1=$(sim_n slot1_supported)
++    case "$sim_active$sim_wanted$sim_s1" in
++        [12][12][01]) SIM_JSON="{\"slot\":$((sim_active - 1)),\"wanted\":$((sim_wanted - 1)),\"slot1_supported\":$sim_s1}" ;;
++    esac
++    # the ZTE V50 (FINDINGS 204): slot 0 is built-in SIM 1 or the external SIM, slot 1 built-in SIM 2 or 3
++    case $SIM_JSON:$sim_status in '{'*:*'"v50":{'*) SIM_JSON="${SIM_JSON%\}},\"v50\":1}" ;; esac
++fi
++# The mobile data device: the one netifd's WAN uses now (its l3_device) first, the configured one (data_device) while the
++# WAN has none, the slot's CID 1 bearer last. A configured name used to win over the live one, so a WAN on another
++# device (another CID, the other card's bearer after a live switch) was counted on the wrong interface.
++DATA_DEVICE=$(safe_iface "$(jval "$WANJSON" l3_device)" '')
++[ -n "$DATA_DEVICE" ] || DATA_DEVICE=$(safe_iface "$(cfg data_device)" '')
++[ -n "$DATA_DEVICE" ] || DATA_DEVICE=sipa_eth$((SIM_SLOT * 8))
 +LAN_DEVICE=$(safe_iface "$(cfg lan_device)" br-lan)
 +WIFI_DEVICE=$(safe_iface "$(cfg wifi_device)" wlan0)
 +USB_DEVICE=$(safe_iface "$(cfg usb_device)" usb0)
@@ -1965,16 +1949,16 @@ index 0000000..ea88f33
 +	done
 +fi
 +jaddr4() { printf '%s' "$1" | sed -n 's/.*"address": *"\([^"]*\)".*/\1/p' | head -n1; }
-+# jsonfilter, not sed. Two independent reasons, both live on this device (V50, 2026-10-10):
-+#   * `ubus call ... status` pretty-prints across several lines, so `"dns-server": [ ... ]` never
-+#     matches inside ONE line and a line-oriented sed finds nothing at all - jarr_dns returned
-+#     the empty string and the dashboard said "DNS --";
-+#   * the leading `.*` in such a pattern is greedy, so even on a single line it would settle on
-+#     the EMPTY "dns-server" array that "inactive" carries: the last one in the document, not the
-+#     real one.
-+# The interface had two servers configured the whole time. The field is a plain string here, so
-+# the servers are space separated and home.js breaks them onto separate lines.
-+jarr_dns() { t3 jsonfilter -s "$1" -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ' | sed 's/  *$//'; }
++# The active DNS servers of the data interfaces. ubus pretty-prints the array over several lines, so it is read with
++# jsonfilter: the top-level "dns-server" only (never inactive.dns-server), IPv4 and IPv6 status alike, each server
++# once. Based on kanoqwq/mu300-linux@5c8c2f9.
++wan_dns_servers() {
++    local snapshot
++    for snapshot in "$@"; do
++        [ -n "$snapshot" ] || continue
++        jsonfilter -s "$snapshot" -e '@["dns-server"][*]' 2>/dev/null || :
++    done | awk 'NF && !seen[$0]++ { printf "%s%s", sep, $0; sep = ", " }'
++}
 +
 +wan_up=$(jval "$WANJSON" up)
 +[ "$wan_up" = "true" ] && wan_up=1 || wan_up=0
@@ -1984,9 +1968,19 @@ index 0000000..ea88f33
 +wan6_up=$(jval "$WAN6JSON" up)
 +[ "$wan6_up" = "true" ] && wan6_up=1 || wan6_up=0
 +wan6_ip=$(t2 ip -6 addr show "$DATA_DEVICE" 2>/dev/null | awk '/inet6 [23]/{split($2,s,"/"); print s[1]; exit}')
-+wan_dns=$(jarr_dns "$WANJSON")
-+apn=$(t3 uci -q get "network.$DATA_IFACE.apn")
++wan_dns=$(wan_dns_servers "$WANJSON" "$WAN6JSON")
++# slot 1 (the F50's internal card) has its own APN option, see mu300cell.sh
++apn_option=apn
++[ "$SIM_SLOT" != 1 ] || apn_option=apn_internal
++apn=$(t3 uci -q get "network.$DATA_IFACE.$apn_option")
 +[ -n "$apn" ] || apn="(SIM default)"
++# data roaming (mobile-data, docs/FINDINGS.md 120): the card's setting - unset or anything but a "no" is allowed, as
++# the dial reads it - and whether data is held back because the card is registered as roaming
++roam_option=roaming
++[ "$SIM_SLOT" != 1 ] || roam_option=roaming_internal
++case $(t3 uci -q get "network.$DATA_IFACE.$roam_option") in 0|off|no|false) roam_allowed=0 ;; *) roam_allowed=1 ;; esac
++roam_held=0
++[ ! -e "${MU300_ROAM_HELD:-/run/mu300/data-roaming-held}" ] || roam_held=1
 +
 +# ------------------------------------------------------------------- system
 +NOW=$(date +%s)
@@ -2027,7 +2021,7 @@ index 0000000..ea88f33
 +T_HOT=$(temp_hottest)
 +
 +# ------------------------------------------------------------------- power
-+# Only the U30 Air has a battery. Its fuel gauge is "battery" under 5.4 (the
++# Only the U30 Air has a battery (the F50 and the V50 have none). Its fuel gauge is "battery" under 5.4 (the
 +# vendor charger manager) and "sc27xx-fgu" under mainline (UMP9620, FINDINGS
 +# 33d); any other supply of type Battery is taken after those. The F50 has
 +# none, but the same PMIC: under mainline its fuel gauge appears with made-up
@@ -2042,7 +2036,7 @@ index 0000000..ea88f33
 +# exposes them, the input voltage and current; mainline: bq256xx-charger (online only).
 +PSY=${MU300_POWER_SUPPLY_DIR:-/sys/class/power_supply}
 +P_DIR=
-+if [ "$(mu300-device 2>/dev/null)" != f50 ]; then
++case $(mu300-device 2>/dev/null) in f50|v50) ;; *)
 +    for d in "$PSY/battery" "$PSY/sc27xx-fgu" "$PSY"/*; do
 +        [ -d "$d" ] || continue
 +        [ "$(rd "$d/present")" = 0 ] && continue
@@ -2052,7 +2046,7 @@ index 0000000..ea88f33
 +        esac
 +        P_DIR=$d; break
 +    done
-+fi
++    ;; esac
 +P_PRESENT=0 P_CAP= P_STATUS= P_V= P_I= P_USB= P_IN_V= P_IN_I=
 +if [ -n "$P_DIR" ]; then
 +    P_PRESENT=1
@@ -2084,6 +2078,8 @@ index 0000000..ea88f33
 +
 +# ------------------------------------------------------- interface counters
 +net_obj() {  # net_obj IFACE -> {"rx":N,"tx":N,"up":0|1} or null
++    # an interface name by safe_iface's rule, or nothing is read: the name becomes a /sys path
++    [ -n "$1" ] && [ "$(safe_iface "$1" '')" = "$1" ] || { echo null; return; }
 +    local d=/sys/class/net/$1
 +    [ -d "$d" ] || { echo null; return; }
 +    local rx tx up
@@ -2123,30 +2119,63 @@ index 0000000..ea88f33
 +[ "$W_DIS" = "1" ] && W_UP=0 || W_UP=1
 +[ -d "/sys/class/net/$WIFI_DEVICE" ] || W_UP=0
 +[ "$W_HOSTAPD" = 1 ] || W_UP=0
-+# station table: one block per client - mac, signal, tx/rx bitrate, connected time
-+W_CLIENTS=$(t3 iw dev "$WIFI_DEVICE" station dump 2>/dev/null | awk -F':\t*' '
-+    /^Station / { mac = $2; sub(/ .*/, "", mac); sig = tx = rx = ct = "" }
-+    /^	signal:/ { sig = $2 + 0 }
-+    /^	tx bitrate:/ { tx = $2; sub(/ .*/, "", tx); sub(/$/, " Mbit/s", tx) }
-+    /^	rx bitrate:/ { rx = $2; sub(/ .*/, "", rx); sub(/$/, " Mbit/s", rx) }
-+    /^	connected time:/ { ct = $2 + 0; ct = int(ct / 60) + " min" }
-+    mac != "" && sig != "" && !seen[mac]++ {
-+        printf "%s|%s|%s|%s|%s\n", mac, sig, tx, rx, ct; sig = ""
-+    }')
++# station table: one block per client - mac, signal, tx/rx bitrate, connected time. A row is written when its block
++# ends (the signal line comes before the bitrates and the connected time), and a client the SC2355 driver reports
++# without metrics still counts. dnsmasq's leases file holds the MAC in lower case and "*" for a client that sent no
++# name. Based on kanoqwq/mu300-linux@373e191.
++LEASES_FILE=${MU300_DHCP_LEASES:-/tmp/dhcp.leases}
++station_rows() {
++    awk '
++    function emit(   a, n, i) {
++        n = split(mac, a, ":")
++        if (n != 6) return
++        for (i = 1; i <= n; i++)
++            if (a[i] !~ /^[0-9a-f][0-9a-f]$/) return
++        if (seen[mac]++) return
++        printf "%s|%s|%s|%s|%s\n", mac, sig, tx, rx, ct
++    }
++    /^Station[ \t]+/ { emit(); mac = tolower($2); sig = tx = rx = ct = ""; next }
++    /^[ \t]+signal:/ && $2 ~ /^-?[0-9]+([.][0-9]+)?$/ && $2 + 0 != 0 { sig = $2 + 0 }
++    /^[ \t]+tx bitrate:/ && $3 ~ /^[0-9]+([.][0-9]+)?$/ { tx = $3 " Mbit/s" }
++    /^[ \t]+rx bitrate:/ && $3 ~ /^[0-9]+([.][0-9]+)?$/ { rx = $3 " Mbit/s" }
++    /^[ \t]+connected time:/ && $3 ~ /^[0-9]+$/ { ct = sprintf("%d min", int($3 / 60)) }
++    END { emit() }'
++}
++W_CLIENTS=$(t3 iw dev "$WIFI_DEVICE" station dump 2>/dev/null | station_rows)
++# SC2355's "station dump" lists only each MAC (and the time); "station get MAC" has the metrics (measured on the U30
++# Air: "rx bitrate: 144.4 MBit/s", "signal: 0 dBm", "tx bitrate: (unknown)"). So a row without them asks once per
++# listed client, at most 16, 2 s each; a field that stays unknown (signal 0, "(unknown)", no connected time) is null.
++# The MAC was checked to be six hex pairs by station_rows, so it reaches iw as one plain argument.
++station_fill() {
++    local mac sig tx rx ct g asked=0
++    while IFS='|' read -r mac sig tx rx ct; do
++        [ -n "$mac" ] || continue
++        if { [ -z "$sig" ] || [ -z "$tx" ] || [ -z "$rx" ] || [ -z "$ct" ]; } && [ "$asked" -lt 16 ]; then
++            asked=$((asked + 1))
++            g=$(t2 iw dev "$WIFI_DEVICE" station get "$mac" 2>/dev/null | station_rows | head -n 1)
++            if [ "${g%%|*}" = "$mac" ]; then
++                set -f; local IFS='|'; set -- $g; IFS=' 	
++'; set +f
++                sig=${sig:-${2:-}}; tx=${tx:-${3:-}}; rx=${rx:-${4:-}}; ct=${ct:-${5:-}}
++            fi
++        fi
++        printf '%s|%s|%s|%s|%s\n' "$mac" "$sig" "$tx" "$rx" "$ct"
++    done
++}
++W_CLIENTS=$(printf '%s\n' "$W_CLIENTS" | station_fill)
 +W_CN=0; W_CLIST=
 +while IFS='|' read -r mac sig txr rxr ct; do
 +    [ -n "$mac" ] || continue
-+    umac=$(echo "$mac" | tr 'a-f' 'A-F')
-+    line=$(awk -v m="$umac" '$2 == m { print $3 "|" $4; exit }' /tmp/dhcp.leases 2>/dev/null)
++    line=$(awk -v m="$mac" 'tolower($2) == m { print $3 "|" $4; exit }' "$LEASES_FILE" 2>/dev/null)
 +    ip=${line%%|*}; host=${line#*|}
-+    [ "$host" = "$line" ] && host=
++    { [ "$host" = "$line" ] || [ "$host" = '*' ]; } && host=
 +    W_CLIST="$W_CLIST{\"mac\":$(qs "$mac"),\"host\":$(qs "$host"),\"ip\":$(qs "$ip"),\"signal\":$(n_or_null "$sig"),\"tx\":$(qs "$txr"),\"rx\":$(qs "$rxr"),\"conn\":$(qs "$ct")},"
 +    W_CN=$((W_CN + 1))
 +done <<EOF2
 +$(printf '%s\n' "$W_CLIENTS")
 +EOF2
 +W_CLIST=${W_CLIST%,}
-+LAN_LEASES=$(cat /tmp/dhcp.leases 2>/dev/null | wc -l)
++LAN_LEASES=$(cat "$LEASES_FILE" 2>/dev/null | wc -l)
 +# recent DHCP leases (host/ip/mac + remaining time) - shows devices that were
 +# here even when nobody is associated right now
 +NOWS=$NOW
@@ -2158,14 +2187,14 @@ index 0000000..ea88f33
 +    left=$(( exp - NOWS ))
 +    [ "$left" -lt 0 ] && left=0
 +    LEASES="$LEASES{\"host\":$(qs "$host"),\"ip\":$(qs "$ip"),\"mac\":$(qs "$mac"),\"left\":$left},"
-+done < /tmp/dhcp.leases 2>/dev/null
++done < "$LEASES_FILE" 2>/dev/null
 +LEASES=${LEASES%,}
 +LAN_IP=$(t2 ip -4 addr show "$LAN_DEVICE" 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
 +
 +# ---------------------------------------------------------------- modem/path
 +# the same liveness rule mu300-atd uses: the URC log on nr0 is written to as
 +# long as the modem is running, whatever it thinks of our commands
-+URCLOG=/run/mu300-at/urc/stty_nr0.log
++URCLOG=/run/mu300-at/urc/stty_nr$((SIM_SLOT * 3)).log
 +if [ -f "$URCLOG" ]; then
 +    AGE=$(( NOW - $(date -r "$URCLOG" +%s 2>/dev/null || echo 0) ))
 +    [ "$AGE" -lt 240 ] && MODEM_ALIVE=1 || MODEM_ALIVE=0
@@ -2175,17 +2204,72 @@ index 0000000..ea88f33
 +ATD_OK=0; /usr/libexec/unisoc-modem/at --available >/dev/null 2>&1 && ATD_OK=1
 +[ "$MODEM_ALIVE" = 1 ] || MODEM_ALIVE=$ATD_OK
 +DATA_PAUSED=0; [ -e /run/mu300-mobile-data-down ] && DATA_PAUSED=1
-+CONNS=$(cat /proc/net/nf_conntrack 2>/dev/null | wc -l)
++# Tracked connections: the kernel's counter needs no CONFIG_NF_CONNTRACK_PROCFS (the mainline kernel has no
++# /proc/net/nf_conntrack); the table is the fallback; neither readable is unknown (null), never a made-up 0. The
++# counter is read with cat in one go: a sysctl file may answer a second short read with EOF. Based on
++# kanoqwq/mu300-linux@373e191.
++conntrack_count() {
++    local count counter=${MU300_CONNTRACK_COUNT:-/proc/sys/net/netfilter/nf_conntrack_count}
++    local table=${MU300_CONNTRACK_TABLE:-/proc/net/nf_conntrack}
++    if [ -r "$counter" ] && count=$(cat "$counter" 2>/dev/null); then
++        case $count in ''|*[!0-9]*) ;; *) echo "$count"; return ;; esac
++    fi
++    if [ -r "$table" ] && count=$(wc -l < "$table" 2>/dev/null); then
++        echo $((count + 0)); return
++    fi
++    echo null
++}
++CONNS=$(conntrack_count)
 +
 +# --------------------------------------------------------------------- VPN
 +VPN_ENABLED=0; VPN_ENGINE=""; VPN_UP=0
++# ENABLE is still vpn.conf's. The engine is the active profile's TYPE (/etc/mu300/vpn/active names the profile,
++# its meta holds TYPE='...'); a device that has not been migrated yet, or runs an older mu300-vpn, has only
++# vpn.conf's ENGINE. The id is checked before it becomes a path and meta is read with sed, never sourced.
 +if [ -r /etc/mu300/vpn.conf ]; then
 +    grep -q '^ENABLE=1' /etc/mu300/vpn.conf && VPN_ENABLED=1
-+    VPN_ENGINE=$(sed -n 's/^ENGINE=//p' /etc/mu300/vpn.conf | tail -n1)
 +fi
-+if ip link show xtun >/dev/null 2>&1 || ip link show sbtun >/dev/null 2>&1; then VPN_UP=1; fi
-+CAP_VPN=0; [ -x /etc/init.d/mu300-vpn ] && CAP_VPN=1
++VPN_ACTIVE=$(head -c 64 /etc/mu300/vpn/active 2>/dev/null | head -n1)
++case $VPN_ACTIVE in
++    *[!a-z0-9-]*|'') ;;
++    *) [ ${#VPN_ACTIVE} -le 32 ] && VPN_ENGINE=$(sed -n "s/^TYPE=//p" "/etc/mu300/vpn/profiles/$VPN_ACTIVE/meta" 2>/dev/null \
++                                                     | tail -n1 | sed "s/^'//; s/'\$//") ;;
++esac
++[ -n "$VPN_ENGINE" ] || VPN_ENGINE=$(sed -n 's/^ENGINE=//p' /etc/mu300/vpn.conf 2>/dev/null | tail -n1)
++# up: the interface the last run brought up (/run/mu300-vpn/iface, any driver), or the two legacy engines' own
++# names; a name is only given to ip when it looks like one
++VPN_IF=$(head -c 32 /run/mu300-vpn/iface 2>/dev/null | head -n1)
++case $VPN_IF in *[!A-Za-z0-9_.-]*|'') VPN_IF="" ;; esac
++if { [ -n "$VPN_IF" ] && ip link show "$VPN_IF" >/dev/null 2>&1; } \
++    || ip link show xtun >/dev/null 2>&1 || ip link show sbtun >/dev/null 2>&1; then VPN_UP=1; fi
++# the VPN is a module of its own (github.com/dikeckaan/mu300-linux-vpn): present when its hook linked mu300-vpn and the
++# service into this system (the images have neither)
++CAP_VPN=0; [ -x /opt/mu300/bin/mu300-vpn ] && [ -x /etc/init.d/mu300-vpn ] && CAP_VPN=1
++# orphaned: the VPN on with its kill switch and no module to enforce it - mobile data and the Wi-Fi client then stay
++# down (lib/vpn-orphan.sh; MU300_SYSROOT, MU300_VPN_CMD, MU300_VPN_ORPHAN_LIB: tests)
++VPN_ORPHANED=0
++_vol=${MU300_VPN_ORPHAN_LIB:-/opt/mu300/lib/vpn-orphan.sh}
++if [ -r "$_vol" ] && . "$_vol" && vpn_killswitch_orphaned "${MU300_VPN_CMD:-/opt/mu300/bin/mu300-vpn}" "${MU300_SYSROOT:-}"; then
++    VPN_ORPHANED=1
++fi
 +CAP_DUALBOOT=0; [ -x /opt/mu300/bin/mu300-next-boot ] && CAP_DUALBOOT=1
++# mu300-next-boot lock: the wish on the Linux disk (the panel shows it; the slot itself is in misc)
++BOOT_LOCK=0
++for _d in /mnt/mu300-disk ""; do [ -f "$_d/.mu300/boot-lock" ] && { BOOT_LOCK=1; break; }; done
++
++# A newer release: the note mu300-update keeps (notice, at boot and every 6 hours; this only reads it). Its tag, for
++# the home page's link to System > Update.
++UPDATE_TAG=$(sed -n 's/^mu300-linux \(v[0-9.]*\) is out .*/\1/p' "${MU300_NOTICE:-/run/mu300/update-available}" 2>/dev/null | head -n1)
++# (a release tag, docs/FINDINGS.md 125: vYYYY.MM.DD, and vYYYY.MM.DD.N after v2026.10.27)
++printf '%s\n' "$UPDATE_TAG" | LC_ALL=C grep -Eqx -- 'v[0-9]{4}\.[0-9]{2}\.[0-9]{2}|v[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])\.[1-9][0-9]?' || UPDATE_TAG=
++
++# ------------------------------------------------------------- data usage
++# mu300-traffic's service writes this summary after each of its readings (RAM, once a minute): today and the
++# billing cycle, against the cap. Numbers and fixed words only; anything else is left out.
++TSUM=${MU300_TRAFFIC_SUMMARY:-/run/mu300/traffic/summary}
++tsum() { sed -n "s/^$1=//p" "$TSUM" 2>/dev/null | head -n1; }
++tint() { v=$(tsum "$1"); case $v in ''|*[!0-9]*|0?*) echo 0 ;; *) echo "$v" ;; esac; }
++T_LEVEL=$(tsum level); case $T_LEVEL in ok|warn|over|none) ;; *) T_LEVEL= ;; esac
 +
 +# ------------------------------------------------------------------ output
 +printf '{"ts":%d,"uptime":%d,"host":%s,"model":%s,"fw":%s,"kernel":%s,' \
@@ -2200,21 +2284,32 @@ index 0000000..ea88f33
 +    "$(n_or_null "$P_W")" "$(n_or_null "$P_USB")" "$(n_or_null "$P_IN_V")" "$(n_or_null "$P_IN_I")" "$(n_or_null "$P_IN_W")"
 +printf '"net":{"mobile":%s,"sipa_eth0":%s,"brlan":%s,"wlan0":%s,"usb0":%s},' \
 +    "$(net_obj "$DATA_DEVICE")" "$(net_obj "$DATA_DEVICE")" "$(net_obj "$LAN_DEVICE")" "$(net_obj "$WIFI_DEVICE")" "$(net_obj "$USB_DEVICE")"
-+printf '"wan":{"up":%d,"uptime":%s,"proto":%s,"apn":%s,"ip4":%s,"ip6":%s,"dns":%s},' \
-+    "$wan_up" "$(n_or_null "$wan_uptime")" "$(qs "$wan_proto")" "$(qs "$apn")" "$(qs "$wan_ip4")" "$(qs "$wan6_ip")" "$(qs "$wan_dns")"
++# the interface the page reads its live rates of (from /proc/net/dev, every second)
++printf '"data_device":%s,' "$(qs "$DATA_DEVICE")"
++printf '"sim":%s,' "$SIM_JSON"
++if [ -n "$T_LEVEL" ]; then
++    printf '"traffic":{"level":"%s","today":%s,"used":%s,"cap":%s,"warn":%s,"clock":%s},' "$T_LEVEL" \
++        "$(( $(tint today_rx) + $(tint today_tx) ))" "$(tint used)" "$(tint cap)" "$(tint warn)" "$(tint clock)"
++else
++    printf '"traffic":null,'
++fi
++printf '"wan":{"up":%d,"uptime":%s,"proto":%s,"apn":%s,"ip4":%s,"ip6":%s,"dns":%s,"roaming":{"allowed":%d,"held":%d}},' \
++    "$wan_up" "$(n_or_null "$wan_uptime")" "$(qs "$wan_proto")" "$(qs "$apn")" "$(qs "$wan_ip4")" "$(qs "$wan6_ip")" "$(qs "$wan_dns")" \
++    "$roam_allowed" "$roam_held"
 +printf '"wifi":{"up":%d,"ssid":%s,"channel":%s,"band":%s,"width":%s,"country":%s,"enc":%s,"hidden":%s,"hostapd":%d,"clients":[%s],"clients_n":%d},' \
 +    "$W_UP" "$(qs "$W_SSID")" "$(qs "$W_CH")" "$(qs "$W_BAND")" "$(qs "$W_WIDTH")" "$(qs "$W_COUNTRY")" "$(qs "$W_ENC")" "$(n_or_null "$W_HIDDEN")" "$W_HOSTAPD" "${W_CLIST:-}" "$W_CN"
 +printf '"lan":{"leases":%s,"ip":%s,"list":[%s]},' "$(n_or_null "$LAN_LEASES")" "$(qs "$LAN_IP")" "${LEASES:-}"
 +printf '"modem":{"alive":%d,"atd":%d,"data_paused":%d},' "$MODEM_ALIVE" "$ATD_OK" "$DATA_PAUSED"
-+printf '"capabilities":{"vpn":%d,"dualboot":%d},' "$CAP_VPN" "$CAP_DUALBOOT"
++printf '"capabilities":{"vpn":%d,"dualboot":%d,"bootlock":%d},' "$CAP_VPN" "$CAP_DUALBOOT" "$BOOT_LOCK"
++printf '"update":%s,' "$(qs "$UPDATE_TAG")"
 +printf '"conns":%s,' "$(n_or_null "$CONNS")"
-+printf '"vpn":{"enabled":%d,"engine":%s,"up":%d}}\n' "$VPN_ENABLED" "$(qs "$VPN_ENGINE")" "$VPN_UP"
++printf '"vpn":{"enabled":%d,"engine":%s,"up":%d,"orphaned":%d}}\n' "$VPN_ENABLED" "$(qs "$VPN_ENGINE")" "$VPN_UP" "$VPN_ORPHANED"
 diff --git a/openwrt/vendor-extra/www/luci-static/resources/view/mu300/home.js b/openwrt/vendor-extra/www/luci-static/resources/view/mu300/home.js
 new file mode 100644
-index 0000000..bdda26b
+index 0000000..5526a9f
 --- /dev/null
 +++ b/openwrt/vendor-extra/www/luci-static/resources/view/mu300/home.js
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,841 @@
 +'use strict';
 +'require view';
 +'require uci';
@@ -2234,10 +2329,41 @@ index 0000000..bdda26b
 +
 +var DEFAULT_POLL_S = 1.5;
 +var RATE_WIN = 40;
++var RATE_MS = 1000;
 +
 +function pollSeconds(value) {
 +	var seconds = Number(value);
 +	return Number.isFinite(seconds) && seconds >= 0.5 && seconds <= 60 ? seconds : DEFAULT_POLL_S;
++}
++
++/* NR bands the modem's SPLBAND masks can carry (unisoc-modem/lock NR_A/NR_B/NR_S): n6 is supported but not in the
++ * tables, so an automatic NR read-back can never list it */
++var NR_CODEC = [ 1, 2, 3, 5, 7, 8, 12, 20, 25, 28, 66, 70, 71, 74, 34, 38, 39, 40, 41, 50, 51, 77, 78, 79,
++	75, 76, 80, 81, 82, 83, 84, 86 ];
++var BAND_CAPS = { nr: [ 1, 5, 6, 8, 28, 41, 78 ], lte: [ 1, 3, 5, 8, 34, 38, 39, 40, 41 ] };
++
++/* lockDeviations(lock_get reply) -> the settings that are not automatic, as short labels ([] = all automatic), or
++ * null when the state is unknown. A band lock is automatic when nothing is locked or every supported band (that the
++ * masks can carry) is in it - the modem reads the cleared mask back as the full set. */
++function lockDeviations(l) {
++	if (!l || l.error || !l.mode) return null;
++	var out = [], caps = l.caps || {};
++	var names = { auto152: _('Automatic without 2G (152)'), '4g': _('4G only'), sa: '5G SA', nsa: '5G NSA' };
++	if (l.mode.label && l.mode.label !== 'auto')
++		out.push(_('Network mode: %s').format(names[l.mode.label] || l.mode.label));
++	if (l.endc && l.endc !== '1') out.push(_('EN-DC off'));
++	[ 'lte', 'nr' ].forEach(function(rat) {
++		var locked = String((l[rat] && l[rat].locked) || '').split(',').map(Number).filter(function(b) { return b > 0; });
++		if (!locked.length) return;
++		var cap = String(caps[rat] || '').split(',').map(Number).filter(function(b) { return b > 0; });
++		if (!cap.length) cap = BAND_CAPS[rat];
++		if (rat === 'nr') cap = cap.filter(function(b) { return NR_CODEC.indexOf(b) >= 0; });
++		if (cap.every(function(b) { return locked.indexOf(b) >= 0; })) return;
++		var p = rat === 'nr' ? 'n' : 'B';
++		out.push((rat === 'nr' ? _('NR band lock: %s') : _('LTE band lock: %s')).format(p + locked.join(' ' + p)));
++	});
++	if ((l.cells || []).length) out.push(_('Cell lock: %s').format(l.cells.join(' ')));
++	return out;
 +}
 +
 +/* The engineering port gives only MCS/BLER; the modulation is derived here from the common 3GPP MCS table 1,
@@ -2285,6 +2411,15 @@ index 0000000..bdda26b
 +		root.innerHTML = this.html();
 +		this.wire(root);
 +		var self = this;
++		/* WPA3 on the hotspot was switched off at boot (openwrt-wifi-wpa2-only, FINDINGS 80): the notice of Status >
++		 * Overview, from the same module (its own English, Turkish and Chinese), above the cards until dismissed */
++		if (typeof L.require === 'function')
++			Promise.resolve().then(function() { return L.require('view.status.include.05_mu300_wpa2'); }).then(function(m) {
++				return m && m.load().then(function(n) {
++					var box = m.render(n);
++					if (box) root.insertBefore(box, root.firstChild);
++				});
++			}).catch(function() {});
 +		var intervalMs = DEFAULT_POLL_S * 1000;
 +		var config = L.resolveDefault(uci.load('unisoc_modem')).then(function() {
 +			intervalMs = pollSeconds(uci.get('unisoc_modem', 'main', 'home_refresh_interval')) * 1000;
@@ -2294,22 +2429,86 @@ index 0000000..bdda26b
 +			self.update(st || {});
 +		});
 +		/* LuCI poll.add() truncates intervals to whole seconds. Use a one-shot
-+		 * timer so 1.5 s remains 1.5 s and slow requests never overlap. */
++		 * timer so 1.5 s remains 1.5 s and slow requests never overlap; after a
++		 * failed snapshot the next one waits longer (M.backoff), up to 18 s. */
++		var fails = 0;
 +		function refresh() {
 +			if (!document.documentElement.contains(root)) return;
-+			L.resolveDefault(M.callStatus()).then(function(st) { self.update(st || {}); }).finally(function() {
++			Promise.resolve(M.callStatus()).then(function(st) {
++				fails = st && st.info ? 0 : fails + 1;
++				self.update(st || {});
++			}, function() { fails++; }).finally(function() {
 +				if (document.documentElement.contains(root))
-+					self._refreshTimer = setTimeout(refresh, intervalMs);
++					self._refreshTimer = setTimeout(refresh, M.backoff(intervalMs, fails));
 +			});
 +		}
 +		Promise.all([first, config]).then(function() {
 +			self._refreshTimer = setTimeout(refresh, intervalMs);
 +		});
++		/* The live rates have a lane of their own, every second: one read of /proc/net/dev in rpcd, no process and
++		 * no AT. The time is the browser's, taken halfway through the request (the status snapshot's whole seconds made
++		 * the rates jump by half at a 1.5 s poll). */
++		var clock = function() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); };
++		function rates() {
++			if (!document.documentElement.contains(root)) return;
++			var t0 = clock();
++			L.resolveDefault(M.callNetDev(), null).then(function(text) {
++				self.rate(text, (t0 + clock()) / 2);
++			}).finally(function() {
++				if (document.documentElement.contains(root))
++					self._rateTimer = setTimeout(rates, RATE_MS);
++			});
++		}
++		/* (render() runs before the page is in the document: the lane starts once the first snapshot is in) */
++		first.then(function() { self._rateTimer = setTimeout(rates, 0); });
 +		return root;
 +	},
 +
 +	unload: function() {
 +		clearTimeout(this._refreshTimer);
++		clearTimeout(this._rateTimer);
++	},
++
++	/* One reading of the fast lane: rates over the time since the last one (a counter that went down - the interface
++	 * was made again - starts over), the sparklines and the totals since the interface came up. */
++	rate: function(text, t) {
++		var dev = this.dataDev || 'sipa_eth0', c = text ? M.netDev(text, dev) : null;
++		if (!c || !isFinite(c.rx) || !isFinite(c.tx)) return;
++		this.fastNet = true;
++		var last = this.lastRate;
++		this.lastRate = { dev: dev, t: t, rx: c.rx, tx: c.tx };
++		M.set('rx', M.fmtBytes(c.rx)); M.set('tx', M.fmtBytes(c.tx));
++		if (!last || last.dev !== dev || t - last.t < 200 || c.rx < last.rx || c.tx < last.tx) return;
++		var dt = (t - last.t) / 1000;
++		this.pushRate((c.rx - last.rx) / dt, (c.tx - last.tx) / dt);
++	},
++
++	pushRate: function(dl, ul) {
++		M.set('dl', M.fmtRate(dl)); M.set('ul', M.fmtRate(ul));
++		this.dlHist.push(dl); this.ulHist.push(ul);
++		if (this.dlHist.length > RATE_WIN) { this.dlHist.shift(); this.ulHist.shift(); }
++		var peak = Math.max(1, Math.max.apply(null, this.dlHist.concat(this.ulHist)));
++		M.spark(M.v('spark-dl'), this.dlHist, 0, peak, RATE_WIN);
++		M.spark(M.v('spark-ul'), this.ulHist, 0, peak, RATE_WIN);
++	},
++
++	/* Today's and this billing cycle's mobile data (mu300-traffic's summary in the status snapshot), against the cap */
++	paintUsage: function(u) {
++		var box = M.v('usage');
++		if (!box) return;
++		box.style.display = u ? '' : 'none';
++		if (!u) return;
++		M.set('usage-today', M.fmtBytes(u.today));
++		var cap = u.cap > 0 ? u.cap : 0, pct = cap ? Math.min(100, Math.round(u.used * 100 / cap)) : null;
++		M.set('usage-cycle', cap ? _('%s of %s').format(M.fmtBytes(u.used), M.fmtBytes(cap)) : M.fmtBytes(u.used));
++		var col = u.level === 'over' ? 'var(--danger,#E25555)' : u.level === 'warn' ? 'var(--warning,#f59e0b)' : '';
++		M.v('usage-cycle').style.color = col;
++		var bar = M.v('usage-bar');
++		M.v('usage-meter').style.display = cap ? '' : 'none';
++		bar.style.width = (pct || 0) + '%';
++		bar.style.background = col || 'var(--brand,var(--primary,#3b82f6))';
++		M.set('usage-note', u.level === 'over' ? _('The monthly cap is reached') :
++			u.level === 'warn' ? _('%d%% of the monthly cap is used').format(pct) : _('This billing cycle'));
 +	},
 +
 +	html: function() {
@@ -2322,6 +2521,8 @@ index 0000000..bdda26b
 +    <div class="mud-rat" id="mud-rat">--<span class="mud-bars" id="mud-bars"><i style="height:25%"></i><i style="height:45%"></i><i style="height:65%"></i><i style="height:85%"></i><i style="height:100%"></i></span></div>
 +    <div class="mud-op" id="mud-op">--</div>
 +    <div class="mud-cellline" id="mud-cellline"></div>
++    <div class="mud-note" id="mud-stale" style="display:none;margin:4px 0 0;color:var(--warning,#f59e0b)"></div>
++    <a class="mud-note" id="mud-update" href="${L.url('admin/system/mu300-update')}" style="display:none;margin:4px 0 0;color:var(--brand,var(--primary,#2f7bf6))"></a>
 +  </div>
 +  <div class="mud-hero-r">
 +    <div class="mud-rsrp" id="mud-rsrp">--</div>
@@ -2347,13 +2548,19 @@ index 0000000..bdda26b
 +    <div class="mud-kpi"><b id="mud-rx">--</b><span>${_('Total received')}</span></div>
 +    <div class="mud-kpi"><b id="mud-tx">--</b><span>${_('Total sent')}</span></div>
 +  </div>
++  <a class="mud-kpis" id="mud-usage" href="${L.url('admin/modem/traffic')}" style="display:none;color:inherit;text-decoration:none">
++    <div class="mud-kpi"><b id="mud-usage-today">--</b><span>${_('Used today')}</span></div>
++    <div class="mud-kpi"><b id="mud-usage-cycle">--</b><span id="mud-usage-note">${_('This billing cycle')}</span><div class="mud-meter" id="mud-usage-meter"><i id="mud-usage-bar"></i></div></div>
++  </a>
 +  <div class="mud-cols">
 +    <div>
 +      <div class="mud-rows">
 +        <div class="mud-r"><span class="mud-k">IPv4 / IPv6</span><span class="mud-v" id="mud-ip">--</span></div>
 +        <div class="mud-r"><span class="mud-k">APN</span><span class="mud-v" id="mud-apn">--</span></div>
++        <div class="mud-r" id="mud-simsrc-r" style="display:none"><span class="mud-k">${_('SIM source')}</span><span class="mud-v" id="mud-simsrc">--</span></div>
 +        <div class="mud-r"><span class="mud-k">${_('Session duration')}</span><span class="mud-v" id="mud-sess">--</span></div>
 +        <div class="mud-r"><span class="mud-k">${_('Registration')}</span><span class="mud-v" id="mud-reg">--</span></div>
++        <div class="mud-r"><span class="mud-k">${_('Data roaming')}</span><span class="mud-v" id="mud-roam">--</span></div>
 +        <div class="mud-r"><span class="mud-k">DNS</span><span class="mud-v" id="mud-dns">--</span></div>
 +      </div>
 +    </div>
@@ -2381,7 +2588,7 @@ index 0000000..bdda26b
 +    <div class="mud-kpi"><b id="mud-cpu">--</b><span>${_('CPU usage')}</span><div class="mud-meter"><i id="mud-cpu-bar" style="background:var(--brand,var(--primary,#3b82f6))"></i></div></div>
 +    <div class="mud-kpi"><b id="mud-ram">--</b><span>${_('Memory')} · <span class="mud-sub" id="mud-ram-sub">--</span></span><div class="mud-meter"><i id="mud-ram-bar" style="background:var(--info,#0ea5e9)"></i></div></div>
 +    <div class="mud-kpi"><b id="mud-disk">--</b><span>${_('Storage')}</span><div class="mud-meter"><i id="mud-disk-bar" style="background:var(--warning,#f59e0b)"></i></div></div>
-+    <div class="mud-kpi" id="mud-batt-kpi" style="display:none"><b id="mud-batt">--</b><span id="mud-batt-l">${_('Battery')}</span></div>
++    <div class="mud-kpi" id="mud-batt-kpi" style="display:none"><b id="mud-batt">--</b><span id="mud-batt-l">${_('Battery')}</span><div class="mud-meter" id="mud-batt-meter" hidden aria-hidden="true"><i id="mud-batt-bar" style="width:0%;background:var(--success,#16a34a)"></i></div></div>
 +  </div>
 +  <div id="mud-freqs" class="mud-freqs"></div>
 +  <div class="mud-cols">
@@ -2411,6 +2618,7 @@ index 0000000..bdda26b
 +        <div class="mud-r"><span class="mud-k">IMEI</span><span class="mud-v" id="mud-imei">--</span></div>
 +        <div class="mud-r"><span class="mud-k">IMSI</span><span class="mud-v" id="mud-imsi">--</span></div>
 +        <div class="mud-r"><span class="mud-k">ICCID</span><span class="mud-v" id="mud-iccid">--</span></div>
++        <div class="mud-r" id="mud-msisdn-r" style="display:none"><span class="mud-k">${_('Own number')}</span><span class="mud-v" id="mud-msisdn">--</span></div>
 +        <div class="mud-r"><span class="mud-k">${_('Module')}</span><span class="mud-v" id="mud-fwmodel">--</span></div>
 +        <div class="mud-r"><span class="mud-k">${_('Firmware')}</span><span class="mud-v" id="mud-fw">--</span></div>
 +      </div>
@@ -2426,10 +2634,12 @@ index 0000000..bdda26b
 +  <div class="mud-ctl" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
 +    <button class="mud-btn" id="mud-btn-data">${_('Data connection')}</button>
 +    <button class="mud-btn" id="mud-btn-radio">${_('Cellular radio')}</button>
++    <button class="mud-btn" id="mud-btn-roam">${_('Data roaming')}</button>
 +    <button class="mud-btn" id="mud-btn-wifi">${_('Wi-Fi hotspot')}</button>
 +    <button class="mud-btn warn" id="mud-btn-modem">${_('Restart modem')}</button>
-+    <button class="mud-btn warn" id="mud-btn-reboot">${_('Restart device')}</button>
++    <button class="mud-btn warn" id="mud-btn-reboot">${_('Power off or restart')}</button>
 +    <button class="mud-btn warn" id="mud-btn-android">${_('Switch to Android')}</button>
++    <button class="mud-btn" id="mud-btn-bootlock">${_('Lock Linux')}</button>
 +  </div>
 +</div>
 +<div class="mud-sec">
@@ -2448,6 +2658,7 @@ index 0000000..bdda26b
 +		this.identShown = false;
 +		this.dlHist = []; this.ulHist = [];
 +		this.lastNet = null; this.lastCpu = null; this.lastFullTs = 0;
++		this.lastRate = null; this.fastNet = false;
 +		this.lockedCell = '';
 +		/* render() runs before the node is in the document, so look up relative to root (update, once mounted, looks in the whole document) */
 +		var q = function(id) { return root.querySelector('#mud-' + id); };
@@ -2472,9 +2683,20 @@ index 0000000..bdda26b
 +			var on = self.lastCell && self.lastCell.cfun === 1;
 +			var btn = this;
 +			(on
-+				? M.confirmBox(_('Turn off cellular radio'), _('Cellular connectivity will be interrupted.'), { danger: true })
-+				: M.confirmBox(_('Turn on cellular radio'), _('The SFUN power-on sequence will run (up to about 1 minute).'))
++				? M.confirmBox(_('Turn off cellular radio'), _('This SIM will have no calls, SMS or data, and its radio stays off after a reboot until you turn it on again.'), { danger: true })
++				: M.confirmBox(_('Turn on cellular radio'), _('The radio of the SIM in use comes on and stays on after a reboot (up to about 1 minute).'))
 +			).then(function(go) { if (go) act('radio', on ? 'off' : 'on', null, btn); });
++		};
++		/* data roaming of the SIM in use (mobile-data, FINDINGS 120): off keeps data down while the SIM is registered
++		 * as roaming. Some SIMs say "roaming" at home (an MVNO on another operator's network, national roaming). */
++		q('btn-roam').onclick = function() {
++			var ro = self.lastInfo && self.lastInfo.wan && self.lastInfo.wan.roaming;
++			var on = !ro || !!ro.allowed;
++			var btn = this;
++			(on
++				? M.confirmBox(_('Turn data roaming off'), _('While the SIM is registered on a roaming network, mobile data stays off; SMS, calls and the registration are not affected. Some SIMs report roaming at home (an MVNO, national roaming): there, data would stop as well.'))
++				: M.confirmBox(_('Allow data roaming'), _('Mobile data is used on roaming networks too, which can cost extra. Some SIMs report roaming at home (an MVNO, national roaming) and need this to have data at all.'))
++			).then(function(go) { if (go) act('roaming', on ? 'off' : 'on', null, btn); });
 +		};
 +		q('btn-wifi').onclick = function() {
 +			var on = self.lastInfo && self.lastInfo.wifi && self.lastInfo.wifi.up;
@@ -2485,19 +2707,55 @@ index 0000000..bdda26b
 +			M.confirmBox(_('Restart modem'), _('Cellular connectivity may stop for 1–2 minutes.'), { danger: true })
 +				.then(function(go) { if (go) act('modem-reset', null, null, btn); });
 +		};
++		/* power off or restart (kanoqwq's b8d4f222): both the orderly way, after the reply is out */
 +		q('btn-reboot').onclick = function() {
 +			var btn = this;
-+			M.confirmBox(_('Restart the entire device'), _('All connections will be interrupted.'), { danger: true })
-+				.then(function(go) { if (go) act('reboot', null, null, btn); });
++			M.choiceBox(_('Power off or restart'), _('All connections will be interrupted.'), [
++				{ label: _('Cancel'), value: undefined },
++				{ label: _('Power off'), value: 'poweroff', danger: true },
++				{ label: _('Restart'), value: 'reboot', danger: true }
++			]).then(function(op) { if (op === 'poweroff' || op === 'reboot') act(op, null, null, btn); });
 +		};
++		/* The network mode and band locks live in the modem's NV, which Android shares: they stay in force there (#96).
++		 * When the last lock state shows anything not automatic, the dialog says so and offers to reset first; when
++		 * the state cannot be read, it is the plain dialog. The switch itself is never blocked. */
 +		q('btn-android').onclick = function() {
 +			var btn = this;
-+			M.confirmBox(_('Switch to Android'),
-+				[ _('The next boot will enter Android and reboot now. This management page and cellular sharing will disconnect.'),
-+				  _('To return to OpenWrt, run mu300-next-boot linux in Android and reboot.'),
-+				  _('Or do nothing: after five boots that do not finish, it falls back automatically.') ].join('\n'),
-+				{ danger: true, okText: _('Switch and reboot') })
-+				.then(function(go) { if (go) act('os', 'android', _('Preparing Android boot and rebooting…'), btn); });
++			var msg = [ _('The next boot will enter Android and reboot now. This management page and cellular sharing will disconnect.'),
++				_('To return to OpenWrt, run mu300-next-boot linux in Android and reboot.'),
++				_('Or do nothing: after five boots that do not finish, it falls back automatically.') ].join('\n');
++			var go = function() { act('os', 'android', _('Preparing Android boot and rebooting…'), btn); };
++			L.resolveDefault(M.callLockGet(), null).then(function(l) {
++				if (l && l.mode) self.lastLock = l;
++				var lk = lockDeviations(self.lastLock);
++				if (!lk || !lk.length)
++					return M.confirmBox(_('Switch to Android'), msg, { danger: true, okText: _('Switch and reboot') })
++						.then(function(ok) { if (ok) go(); });
++				return M.choiceBox(_('Switch to Android'),
++					_('Not automatic: %s. The network mode and band locks are stored in the modem and stay in force in Android too; if the network does not match them, Android shows No Service.').format(lk.join(', ')) +
++						'\n\n' + msg,
++					[ { label: _('Cancel'), value: '' },
++					  { label: _('Switch and reboot'), value: 'plain', danger: true },
++					  { label: _('Reset locks and switch'), value: 'reset', danger: true } ])
++					.then(function(choice) {
++						if (choice === 'plain') go();
++						else if (choice === 'reset') self.resetLocksThen(self.lastLock, btn, go);
++					});
++			});
++		};
++		q('btn-bootlock').onclick = function() {
++			var btn = this;
++			var locked = !!(self.lastInfo && self.lastInfo.capabilities && self.lastInfo.capabilities.bootlock);
++			(locked
++				? M.confirmBox(_('Unlock Linux'),
++					_('After five boots in a row that do not finish, the device falls back to Android again.'),
++					{ okText: _('Unlock') })
++				: M.confirmBox(_('Lock Linux'),
++					[ _('The device will never switch to Android by itself, not even after failed boots: Android only from this page (Switch to Android) or with mu300-next-boot android.'),
++					  _('A new kernel from an update still gets its first boots on trial, and locks again once one of them succeeds.'),
++					  _('If the system itself no longer starts, the device waits on USB (telnet) instead of going to Android.') ].join('\n'),
++					{ danger: true, okText: _('Lock') })
++			).then(function(go) { if (go) act('os', locked ? 'unlock' : 'lock', null, btn); });
 +		};
 +		q('reveal').onclick = function() {
 +			self.identShown = !self.identShown;
@@ -2532,9 +2790,70 @@ index 0000000..bdda26b
 +	refreshLock: function() {
 +		var self = this;
 +		L.resolveDefault(M.callLockGet()).then(function(l) {
++			if (l && l.mode) self.lastLock = l;
++			/* no reading yet (a reboot): the backend reads in the background; ask again a little later */
++			if (l && l.busy && (self._lockTries = (self._lockTries || 0) + 1) <= 8) {
++				setTimeout(function() { self.refreshLock(); }, 5000);
++				return;
++			}
 +			self.lockedCell = (l || {}).cells || [];
 +			self.repaintNeigh();
 +		});
++	},
++
++	/* Reset every lock to automatic (lock_set reset: one SFUN restart, the saved settings cleared), wait until the
++	 * lock cache shows a read newer than the one before (or two minutes pass), then run then(). A refused reset stops
++	 * here: the user asked for the reset first. */
++	/* The reset is verified by the backend (unisoc-modem/lock reset: the writes' answers checked, the settings read
++	 * back before and after the restart, the saved locks deleted only then) and its result comes with lock_get as
++	 * "reset"; a result newer than the one shown before the click decides. A failed reset stops the switch: Android
++	 * would come up with the locks the modem still has. */
++	resetLocksThen: function(before, btn, then) {
++		var base = (before && before.ts) || 0, prevEnd = ((before || {}).reset || {}).end || 0, tries = 0;
++		M.busy(btn, true);
++		M.toast(_('Resetting the network locks to automatic (SFUN restart, about 30 seconds)…'), { type: 'busy' });
++		L.resolveDefault(M.callLockSet('reset', 'auto'), null).then(function(r) {
++			r = r || {};
++			if (!r.ok) {
++				M.busy(btn, false);
++				M.toast(_('Failed: %s').format(M.errText(r)), { type: 'error' });
++				return;
++			}
++			var step = function() {
++				L.resolveDefault(M.callLockGet(), null).then(function(l) {
++					l = l || {};
++					var res = l.reset || {}, done = res.state && res.state !== 'running' && (res.end || 0) > prevEnd;
++					if (done && res.state !== 'ok') {
++						M.busy(btn, false);
++						M.toast(_('Reset failed: %s. The saved lock settings were kept.').format(
++							M.errText({ error: res.error, detail: res.cmd || res.step })), { type: 'error' });
++						return;
++					}
++					var fresh = l.ts && l.ts > base, auto = done || (fresh && !(lockDeviations(l) || [ 1 ]).length);
++					if (auto || ++tries > 60) {
++						M.busy(btn, false);
++						if (!auto)
++							M.toast(_('The lock reset was not confirmed in time; switching anyway.'), { type: 'error' });
++						then();
++					} else setTimeout(step, 2500);
++				});
++			};
++			setTimeout(step, 2500);
++		});
++	},
++
++	/* The SIM the configuration asks for, when it is not the one in use (dashboard-info's "sim", from mu300-sim).
++	 * On a device without slot 1 the selector uses the external card and every figure on this page is that card's:
++	 * say so, instead of showing it as if the internal SIM had been taken (issue #194). A row only then. */
++	paintSim: function(sim) {
++		var row = M.v('simsrc-r');
++		if (!row) return;
++		var text = '';
++		if (sim && sim.wanted === 1 && sim.slot !== 1)
++			text = sim.slot1_supported ? _('Internal SIM selected: in use after a reboot')
++				: _('Internal SIM selected, but not supported on this device: the external SIM is in use');
++		row.style.display = text ? '' : 'none';
++		M.set('simsrc', text || '--');
 +	},
 +
 +	paintIdent: function(cell) {
@@ -2546,6 +2865,12 @@ index 0000000..bdda26b
 +		M.set('imei', mask(id && id.imei));
 +		M.set('imsi', mask(id && id.imsi));
 +		M.set('iccid', mask(id && id.iccid));
++		/* The SIM's own number (CNUM, else the IMS identity; full rounds only): a row only when there is one, masked
++		 * like the other identifiers. Personal data: shown here, never logged (the backend keeps it out of its logs). */
++		var num = cell && !cell.error && typeof cell.msisdn === 'string' ? cell.msisdn : '';
++		var numRow = M.v('msisdn-r');
++		if (numRow) numRow.style.display = num ? '' : 'none';
++		M.set('msisdn', mask(num));
 +		M.set('fwmodel', id ? (id.model || '--') : '--');
 +		M.set('fw', id ? (id.fw || '--') : '--');
 +	},
@@ -2603,12 +2928,22 @@ index 0000000..bdda26b
 +			else if (lte) {
 +				var act = (c.operator && c.operator.act) || (c.reg && c.reg.act);
 +				rat = (act == 13) ? '5G NSA' : (act == 11 || act == 18 || act == 19) ? '5G' : (act == 7 || act == 10) ? '4G' : (act >= 2 && act <= 6) ? '3G' : '4G';
-+			} else if (c.cfun === 0) rat = _('Radio off');
++			} else if (c.cfun === 0 || c.cfun === 4) rat = _('Radio off');
 +		}
 +		if (c && c.error) { rat = _('No response'); col = M.qCol('poor'); }
 +		var ratEl = M.v('rat');
 +		ratEl.firstChild.nodeValue = rat;
 +		ratEl.style.color = col;
++		/* The cellular readings come from a cache the backend refreshes in the background, never inside this call: when
++		 * the modem is busy (a long AT command, a lock apply, a restart) they stay as they were, and say how old they are
++		 * rather than pass for live ones. */
++		var staleEl = M.v('stale');
++		if (staleEl) {
++			var age = Number(st.sig_age);
++			var stale = st.info && !(c && c.error) && age > 15;
++			staleEl.style.display = stale ? '' : 'none';
++			staleEl.textContent = stale ? _('Modem busy: cellular readings from %s ago').format(M.ageText(age)) : '';
++		}
 +		var bars = M.v('bars');
 +		if (bars) {
 +			var n = score == null ? 0 : Math.max(1, Math.round(score / 2));
@@ -2649,23 +2984,20 @@ index 0000000..bdda26b
 +		M.set('qci', qos && qos.qci != null ? qos.qci : '--');
 +		M.set('ambr', qos && qos.dl != null ? qos.dl + ' / ' + qos.ul + ' Mbps' : '--');
 +
++		/* the rates and totals are the fast lane's (rate); only while it has nothing (a panel whose ACL predates it),
++		 * the snapshot's counters stand in, over its whole seconds */
++		if (i.data_device) this.dataDev = i.data_device;
 +		var net = (i.net && (i.net.mobile || i.net.sipa_eth0)) || null;
-+		if (net && this.lastNet && i.ts && this.lastNet.ts) {
-+			var dt = i.ts - this.lastNet.ts;
-+			if (dt > 0) {
-+				var dl = (net.rx - this.lastNet.rx) / dt, ul = (net.tx - this.lastNet.tx) / dt;
-+				M.set('dl', M.fmtRate(dl)); M.set('ul', M.fmtRate(ul));
-+				this.dlHist.push(dl); this.ulHist.push(ul);
-+				if (this.dlHist.length > RATE_WIN) { this.dlHist.shift(); this.ulHist.shift(); }
-+				var peak = Math.max(1, Math.max.apply(null, this.dlHist.concat(this.ulHist)));
-+				M.spark(M.v('spark-dl'), this.dlHist, 0, peak, RATE_WIN);
-+				M.spark(M.v('spark-ul'), this.ulHist, 0, peak, RATE_WIN);
-+			}
-+		}
-+		if (net) {
++		if (net && !this.fastNet) {
++			if (this.lastNet && i.ts && this.lastNet.ts && i.ts > this.lastNet.ts && net.rx >= this.lastNet.rx && net.tx >= this.lastNet.tx)
++				this.pushRate((net.rx - this.lastNet.rx) / (i.ts - this.lastNet.ts), (net.tx - this.lastNet.tx) / (i.ts - this.lastNet.ts));
 +			M.set('rx', M.fmtBytes(net.rx)); M.set('tx', M.fmtBytes(net.tx));
 +			this.lastNet = { ts: i.ts, rx: net.rx, tx: net.tx };
 +		}
++		this.paintUsage(i.traffic || null);
++		/* a newer release: the updater's own note (mu300-update notice, at boot and every 6 hours), a link to System > Update */
++		M.v('update').style.display = i.update ? '' : 'none';
++		if (i.update) M.set('update', _('Version %s is out: update').format(i.update));
 +		var w = i.wan || {};
 +		M.v('ip').innerHTML = M.esc(w.ip4 || '--') + (w.ip6 ? '<br>' + M.esc(w.ip6) : '');
 +		/* one resolver per line, laid out like the address above it. M.set() writes textContent and
@@ -2674,6 +3006,7 @@ index 0000000..bdda26b
 +		var dnsEl = M.v('dns');
 +		if (dnsEl) dnsEl.innerHTML = dnsList.length ? dnsList.map(M.esc).join('<br>') : '--';
 +		M.set('apn', w.apn || '--');
++		this.paintSim(i.sim);
 +		M.set('sess', w.uptime ? M.fmtUptime(w.uptime) : '--');
 +		var regmap = { 0: _('Not registered'), 1: _('Registered'), 2: _('Searching'), 3: _('Registration denied'), 4: _('Unknown'), 5: _('Registered (roaming)'), 7: _('Emergency only'), 8: _('Emergency only'), 10: _('Registered') };
 +		var reg = '--';
@@ -2683,6 +3016,9 @@ index 0000000..bdda26b
 +			if (c.reg5g && c.reg5g.stat == 1) reg += ' · 5G ' + regmap[c.reg5g.stat];
 +		} else if (c && c.error) reg = M.errText(c);
 +		M.set('reg', reg);
++		var ro = w.roaming || null;
++		M.set('roam', !ro ? '--' : ro.held ? _('Off: data held back while roaming') : ro.allowed ? _('Allowed') : _('Off'));
++		M.v('roam').style.color = ro && ro.held ? 'var(--warning,#f59e0b)' : '';
 +
 +		var anchor = (c && c.lte && c.lte.band) ? c.lte : null;
 +		M.v('lteanchor').innerHTML = anchor ?
@@ -2789,39 +3125,52 @@ index 0000000..bdda26b
 +			M.set('batt', p.capacity != null ? p.capacity + '%' : (p.volt != null ? p.volt + ' V' : '--'));
 +			M.set('batt-l', parts.join(' · '));
 +		}
++		/* the capacity as a bar, as CPU, memory and storage have (kanoqwq's edcdeb27) */
++		var bpct = p.present && typeof p.capacity === 'number' && isFinite(p.capacity) ? Math.max(0, Math.min(100, p.capacity)) : null;
++		if (M.v('batt-meter')) {
++			M.v('batt-meter').hidden = bpct == null;
++			M.v('batt-bar').style.width = (bpct == null ? 0 : bpct) + '%';
++		}
 +		M.set('model', i.model || '--');
 +		M.set('fwos', i.fw || '--');
 +		M.set('modem', (i.modem && i.modem.alive ? _('Online') : _('No response')) + (i.modem && i.modem.atd ? '' : ' · ' + _('AT adapter unavailable')));
 +		var androidBtn = M.v('btn-android');
 +		if (androidBtn) androidBtn.style.display = i.capabilities && i.capabilities.dualboot ? '' : 'none';
++		var lockBtn = M.v('btn-bootlock');
++		if (lockBtn) {
++			lockBtn.style.display = i.capabilities && i.capabilities.dualboot ? '' : 'none';
++			var lk = !!(i.capabilities && i.capabilities.bootlock);
++			lockBtn.className = 'mud-btn' + (lk ? ' on' : '');
++			lockBtn.textContent = lk ? _('Linux locked') : _('Lock Linux');
++		}
 +
 +		var b;
 +		b = M.v('btn-data'); b.className = 'mud-btn' + (w.up ? ' on' : ''); b.textContent = _('Data connection');
 +		b = M.v('btn-radio'); b.className = 'mud-btn' + (c && c.cfun === 1 ? ' on' : ''); b.textContent = _('Cellular radio');
++		b = M.v('btn-roam'); b.className = 'mud-btn' + (!w.roaming || w.roaming.allowed ? ' on' : ''); b.textContent = _('Data roaming');
 +		b = M.v('btn-wifi'); b.className = 'mud-btn' + (wf.up ? ' on' : ''); b.textContent = _('Wi-Fi hotspot');
 +	}
 +});
 diff --git a/rootfs/overlay/opt/mu300/bin/mu300-buttons b/rootfs/overlay/opt/mu300/bin/mu300-buttons
-index 1a99ba9..ec0d405 100755
+index da26dad..4b3ce20 100755
 --- a/rootfs/overlay/opt/mu300/bin/mu300-buttons
 +++ b/rootfs/overlay/opt/mu300/bin/mu300-buttons
-@@ -4,6 +4,9 @@
- #   power, held 3 s           shut down cleanly (the battery-powered U30 Air; the F50 starts again on USB power)
- #   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED shows the band: blue 5, white 2.4)
+@@ -5,6 +5,8 @@
+ #                             in the charging boot it starts the device instead, as in the stock charger mode
+ #   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED: white 5, blue 2.4, FINDINGS 152)
  #   Wi-Fi key, held 3 s       hotspot off / on
-+# The V50 has a single key and it is neither of those (KEY_FN 464, "Function Key" in its device tree):
-+#   that key, short press     hotspot 2.4 <-> 5 GHz, with the colour flashing (mu300-led flash) to say it was heard
-+#   that key, held 10 s       reboot, all three colours flashing (mu300-led alarm) until the power goes
++#   function key, short press hotspot 2.4 <-> 5 GHz, with the colour flashing (mu300-led flash; the V50's one key)
++#   function key, held 10 s   reboot, all three colours flashing (mu300-led alarm) until the power goes
  # Every press lights the LEDs first (`mu300-led wake`: also in mu300-power's idle, and without any daemon), so a key
  # always shows life. Then it wakes mu300-power with the key's name (`mu300-power wake wifi|power`; other keys count as
  # power), in the background: the wake restores whatever is down by looking (hotspot, modem, LEDs, CPU), which can
-@@ -19,12 +22,23 @@
+@@ -21,12 +23,23 @@
  export PATH="$PATH:/opt/mu300/bin:/usr/sbin:/sbin"
  KEY_POWER=116
  KEY_WIFI=138   # "Wifi Switch Key" in the U30 Air's device tree (KEY_HELP's code, as its Android maps it)
 +# The V50's board has ONE key and it is neither of the two above: its device tree calls it key-function
 +# with linux,code 0x1d0 = 464 = KEY_FN. Nothing matched that code, so on this device every press fell
-+# through the case below and did nothing at all - no band switch, no shutdown. Measured, 2026-10-10:
++# through the case below and did nothing at all - no band switch, no reboot. Measured, 2026-10-10:
 +#   114 KEY_VOLUMEDOWN | 115 KEY_VOLUMEUP | 190 KEY_F20 (key-power) | 464 KEY_FN (key-function)
 +KEY_FN=464
  is_openwrt() { [ -e /etc/openwrt_release ]; }
@@ -2839,16 +3188,16 @@ index 1a99ba9..ec0d405 100755
  # --- deadlines (as in mu300-power): "PID PPID" for every process, a process tree killed, a job with a watchdog
  proc_table() {
      if [ -r /proc/self/stat ]; then
-@@ -81,7 +95,7 @@ hotspot_set() {  # hotspot_set on|off: the toggle itself
+@@ -83,7 +96,7 @@ hotspot_set() {  # hotspot_set on|off: the toggle itself
  }
  band_toggle() { mu300-wifi-band toggle | logger -t mu300-buttons 2>/dev/null; }
  
 -mu300-keys -l 3000 -t 5 | { while read -r code kind; do
 +mu300-keys -l "$HOLD" -t 5 | { while read -r code kind; do
-     # the tick every 5 s is no press: it only lets the LEDs time out
-     if [ "$kind" = tick ]; then mu300-led sleep --if-due; continue; fi
-     mu300-led wake   # first, whatever else this key does or whatever state anything is in
-@@ -104,5 +118,18 @@ mu300-keys -l 3000 -t 5 | { while read -r code kind; do
+     # the tick every 5 s is no press: it lets the LEDs time out, and the U30 Air's battery LED follow the charge
+     # (plugged in, unplugged, the 60 % and 10 % marks)
+     if [ "$kind" = tick ]; then mu300-led tick; continue; fi
+@@ -114,5 +127,18 @@ mu300-keys -l 3000 -t 5 | { while read -r code kind; do
              if is_openwrt; then poweroff; else systemctl poweroff; fi ;;
          "$KEY_WIFI short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
          "$KEY_WIFI long") [ -z "$dir" ] || in_background "$DEADLINE" hotspot_set "$dir" ;;
@@ -2868,386 +3217,58 @@ index 1a99ba9..ec0d405 100755
      esac
  done; wait; }
 diff --git a/rootfs/overlay/opt/mu300/bin/mu300-led b/rootfs/overlay/opt/mu300/bin/mu300-led
-index 86c9801..a1252ea 100755
+index 52f099d..08d2aec 100755
 --- a/rootfs/overlay/opt/mu300/bin/mu300-led
 +++ b/rootfs/overlay/opt/mu300/bin/mu300-led
-@@ -5,6 +5,8 @@
- #                               registered)
- #   mu300-led wifi on|off|sync [S]  the Wi-Fi hotspot is up (U30 Air: blue on 5 GHz, white on 2.4 GHz); sync: whatever
- #                               wlan0 is now, and again every 2 s for S seconds (OpenWrt: LuCI or the button)
-+#   mu300-led flash             the colour that is lit flashes KEY_FLASH_COUNT times and settles again: a key that
-+#                               acted says so at a glance, while the change it made is still on its way (mu300-buttons)
- #   mu300-led wake              show the LEDs again, for LED_TIMEOUT seconds (every key press, mu300-buttons); also
- #                               in mu300-power's idle, for LED_TIMEOUT (60 s when it is 0): a key always shows life
- #   mu300-led sleep [--if-due]  dark now (--if-due: only once the timeout has passed; mu300-buttons asks)
-@@ -21,14 +23,39 @@
- #   network  as ZTE's firmware: blue on 4G (a GPIO, net_blue), white on 5G (LDO VDDCAMA0), red without service
- #            (the PMIC's keypad backlight sink, "keyboard-backlight" under 5.4 and mainline)
- #   Wi-Fi    white: LDO VDDCAMA1 (2.4 GHz); blue: LDO VDDCAMA2 (5 GHz)
-+# ZTE V50: the F50's hardware with a device of its own, so the one network LED carries a second scheme (LED_SCHEME=v50)
-+#   instead of the F50's "which data is up": red without service, white on 5 GHz, blue on 2.4 GHz. No band and no
-+#   network together decide a colour anywhere else, so they decide it in one place here: render(). Two states, both
-+#   read from the outside (a network event and the band), one colour out. keyboard-backlight stays what it was - it
-+#   is a white lamp, no other colour to be had, and this scheme only takes the RGB LED.
- # The LDO ones are zte-ldo0..2 under mainline (leds-zte-ldo) and vddcama0..2_status of ZTE's zte_ldo_leds under
- # 5.4; the other GPIO LEDs in its device tree (net_red, net_green, net_white, pwr_green, wifi_*) light nothing,
- # under Android too.
- # The device comes from mu300-device; an LED this device has not is skipped.
- #
-+# The V50's panel LEDs are not in /sys/class/leds at all: they are an Awinic AW9523B on i2c-3, and the vendor
-+# aw9523b.ko cannot be carried over to this kernel (its vermagic is the stock Android 5.4 build, and modversions
-+# is on). So with LED_BACKEND=i2c the V50 writes the chip itself, from userspace, with i2cset - LED_SCHEME=v50
-+# stays on top of that and nothing else changes. Two things make this cheap:
-+#   - the chip's 16 dimming registers 0x20-0x2F are consecutive, and the panel takes one I2C block write, so a
-+#     whole repaint is a single i2cset. That is why a colour change does not have to clear the other channels
-+#     first: the burst sets all sixteen at once and cannot leave two colours mixed.
-+#   - the registers are NOT in pin order (0x20..0x2F hold pins 8,9,10,11,0,1,2,3,4,5,6,7,12,13,14,15), so a
-+#     colour is a bitmask over the register, not a range of it. The masks come from the stock vendor device tree
-+#     (aw9523b,idx) and were checked against the panel by eye; they are in led.conf so a board that wired the
-+#     chip differently can be corrected without a rebuild.
-+# The current range is GCR 0x11 bits [1:0] (IMAX = 37 mA, then 3/4, 1/2, 1/4). The V50 runs at 1/2 - LED_I2C_GCR.
-+#
- # Timeout: /etc/mu300/led.conf, LED_TIMEOUT=SECONDS (0: always on). Default 60 on the U30 Air, which has a power
- # button to wake them, and 0 on the F50. What each LED should show is kept in /run/mu300/led, so a change while
- # the LEDs are dark shows up on the next wake.
-+# The v50 scheme, all in the same file: LED_SCHEME=classic (the default, every device that is not a V50) or v50;
-+# NO_NET_CHANNEL / NET5_CHANNEL / NET24_CHANNEL (which channel each of the three colours is on); KEY_FLASH_COUNT
-+# (flash, default 2); LED_LEVEL (per cent of max_brightness, to turn a channel down without changing the file).
-+# The V50's panel, the same file: LED_BACKEND=i2c, then LED_I2C_BUS, LED_I2C_ADDR, LED_I2C_GCR, the three colour
-+# masks LED_AW_RED / LED_AW_GREEN / LED_AW_BLUE (16 bits, one per dimming register 0x20..0x2F) and
-+# LED_AW_WHITE_LEVEL. "white" is not a mask of its own - it is all three, which is why it needs no entry, and why
-+# it needs its own percentage: three emitters at once read about three times as bright as one.
- # Every write is best effort: the PMIC rejects a brightness write now and then (mobile-data), and a cosmetic
- # LED must never make a service fail.
- # (MU300_SYSROOT, MU300_BIN and MU300_LED_CONF are for tests/: a fake /, this directory, a led.conf)
-@@ -47,9 +74,48 @@ esac
- # outshines the others when mixed
- SIREN="sc27xx:red sc27xx:green sc27xx:blue"
- SIREN_PID=$R/run/mu300/led-siren.pid
--TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
-+LED_CONF=${MU300_LED_CONF:-/etc/mu300/led.conf}
-+conf() {  # conf KEY: its value in led.conf, the last one set (a line is read only up to the '=')
-+    sed -n "s/^$1=//p" "$LED_CONF" 2>/dev/null | tail -n1
-+}
-+TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$LED_CONF" 2>/dev/null | tail -n1)
+@@ -22,6 +22,9 @@
+ #   mu300-led test              each LED in turn, 2 s each, with its name (to tell which one is where)
+ #   mu300-led alarm on|off      too hot (thermal-guard): the PMIC's RGB LED flashes red, white, blue one at a time
+ #                               like a siren, also while the others are dark
++#   mu300-led flash             the colour that is lit flashes LED_KEY_FLASH_COUNT times and settles again: a key
++#                               that acted says so (V50: the one key switches the band, and the reload that follows
++#                               takes seconds, so the new colour is a while away)
+ # ZTE F50 (read from its Android): network = the PMIC's RGB LED, blue on 4G, white (its "green" channel) on 5G, red
+ #   without service; Wi-Fi = the PMIC's keypad backlight sink ("keyboard-backlight"), at ZTE's 48 of 127, whichever
+ #   band. No power LED. ZTE U30 Air (found by lighting each one):
+@@ -81,6 +84,9 @@ BATTERY_LED=
+ PSY=$R/sys/class/power_supply
+ TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
  TIMEOUT=${TIMEOUT:-$DEFAULT_TIMEOUT}
- 
-+# The v50 scheme (LED_SCHEME=v50), off unless a V50 asks for it: the RGB LED then shows the network and the band
-+# instead of the data alone. Its colours default to the channels this device already uses for its network LED
-+# (red without service, white on 5G, blue on 4G) - the same lamp, given a second thing to say.
-+SCHEME=$(conf LED_SCHEME)
-+[ "$SCHEME" = v50 ] || SCHEME=classic
-+NO_NET=$(conf NO_NET_CHANNEL); NO_NET=${NO_NET:-$NODATA}
-+NET5=$(conf NET5_CHANNEL); NET5=${NET5:-$DATA5G}
-+NET24=$(conf NET24_CHANNEL); NET24=${NET24:-$DATA}
-+KEY_FLASH_COUNT=$(conf KEY_FLASH_COUNT)
++# how often a key's "I heard that" flash blinks (LED_KEY_FLASH_COUNT in led.conf, default 2)
++KEY_FLASH_COUNT=$(sed -n 's/^LED_KEY_FLASH_COUNT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
 +case $KEY_FLASH_COUNT in ''|*[!0-9]*) KEY_FLASH_COUNT=2 ;; esac
-+LED_LEVEL=$(conf LED_LEVEL)
-+case $LED_LEVEL in ''|*[!0-9]*) LED_LEVEL=100 ;; esac
-+SCHEME_LEDS=    # what LED_LEVEL applies to: the v50 scheme's channels, or nothing at all
-+[ "$SCHEME" = v50 ] && SCHEME_LEDS="$NO_NET $NET5 $NET24"
-+
-+# The V50's panel: an AW9523B over i2c-3, driven here from userspace because the vendor aw9523b.ko belongs to the
-+# stock Android kernel and cannot be loaded into this one. Off unless a device says LED_BACKEND=i2c, so nothing
-+# else on any board is affected by any of it.
-+LED_BACKEND=$(conf LED_BACKEND)
-+AW_BUS=$(conf LED_I2C_BUS); AW_ADDR=$(conf LED_I2C_ADDR); AW_GCR=$(conf LED_I2C_GCR)
-+AW_RED=$(conf LED_AW_RED); AW_GREEN=$(conf LED_AW_GREEN); AW_BLUE=$(conf LED_AW_BLUE)
-+AW_WHITE_LEVEL=$(conf LED_AW_WHITE_LEVEL)
-+case $AW_WHITE_LEVEL in ''|*[!0-9]*) AW_WHITE_LEVEL=100 ;; esac
-+aw_panel() { [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ -e "$R/dev/i2c-$AW_BUS" ]; }
-+# i2c_dev is a module here and nothing else on the system asks for it - it loads with a zero refcount and stays
-+# that way. Without /dev/i2c-N the scheme would have no way to reach the chip and the panel would simply stay dark,
-+# with no error anywhere: the worst way for a cosmetic feature to fail. Skipped under MU300_SYSROOT, where tests
-+# run against a fake / and there is no module to load.
-+if [ -z "$R" ] && [ "$LED_BACKEND" = i2c ] && [ -n "$AW_BUS" ] && [ ! -e "/dev/i2c-$AW_BUS" ]; then
-+    modprobe i2c-dev 2>/dev/null || true
-+fi
-+AW_COLOURS="aw:red aw:green aw:blue aw:white"
-+# the siren is the panel's own colours on the V50, the PMIC's RGB channels everywhere else
-+if aw_panel; then SIREN="aw:red aw:green aw:blue"; fi
-+
+ 
  uptime_s() { cut -d. -f1 "$R/proc/uptime" 2>/dev/null || echo 0; }
  before() {  # before FILE: the uptime in FILE has not come yet
-     until=$(cat "$1" 2>/dev/null) || return 1
-@@ -66,20 +132,82 @@ idle() { [ -e "$STATE/.idle" ]; }   # mu300-power's idle: dark, whatever the tim
- # Lit now? Awake as usual; in idle only for a key's wake (.peek-until). The incident of 2026-10-07: idle on, and every
- # key press was swallowed by it - a device dark for hours that looked powered off. A key must always show life.
- shown() { if idle; then before "$STATE/.peek-until"; else awake; fi; }
--has_led() { [ -e "$LEDS/$1" ] || vendor_ldo "$1" >/dev/null; }
-+has_led() {
-+    case $1 in
-+        aw:*) aw_panel ;;
-+        *)    [ -e "$LEDS/$1" ] || vendor_ldo "$1" >/dev/null ;;
-+    esac
-+}
- level() {  # level NAME: its brightness when lit (ZTE lights the F50's Wi-Fi LED at 48: a low-current sink)
--    case $DEVICE:$1 in f50:keyboard-backlight) echo 48 ;; *) cat "$LEDS/$1/max_brightness" 2>/dev/null ;; esac
-+    case $1 in
-+        # the panel's dimming registers run 0-255; LED_LEVEL scales the same 0-255 as any other channel
-+        aw:*) echo 255 ;;
-+        *)    case $DEVICE:$1 in f50:keyboard-backlight) echo 48 ;; *) cat "$LEDS/$1/max_brightness" 2>/dev/null ;; esac ;;
-+    esac
-+}
-+aw_mask() {  # aw_mask NAME: which of the 16 dimming registers belong to this colour, as a bitmask
-+    case $1 in
-+        aw:red)   echo "$AW_RED" ;;
-+        aw:green) echo "$AW_GREEN" ;;
-+        aw:blue)  echo "$AW_BLUE" ;;
-+        # red+green+blue on the same LEDs is white, and it is all sixteen bits - that is the whole reason white
-+        # needs no mask of its own and cannot come out half-lit
-+        aw:white) echo 0xffff ;;
-+        *)        echo 0 ;;
-+    esac
-+}
-+aw_write() {  # aw_write NAME LEVEL: repaint the whole panel with one I2C block write
-+    _m=$(aw_mask "$1") || return 0
-+    case $_m in ''|*[!0-9a-fA-Fx]*) return 0 ;; esac
-+    _v=$2
-+    # White is not a fourth colour, it is all three at once, so the light adds up. Each LED still carries only its
-+    # own channel's current - the red beads take exactly as much showing white as showing red - but the eye sees
-+    # three emitters instead of one, and at the same DIM white reads about three times as bright as a single
-+    # colour. Scaling white's own DIM is the only knob that helps, and it scales all three together: white can be
-+    # brought level with a single colour but never exactly equal to it. Chosen by eye on this panel, 2026-10-11:
-+    # 50% sits level with blue and still reads as white.
-+    case $1 in aw:white) _v=$(( _v * AW_WHITE_LEVEL / 100 )) ;; esac
-+    _b=
-+    for _i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-+        if [ $(( (_m >> _i) & 1 )) = 1 ]; then _b="$_b $_v"; else _b="$_b 0"; fi
-+    done
-+    # GCR first: it sets the current range, and it must not be lost across a repaint. Best effort throughout, as
-+    # everywhere else here - a cosmetic LED must never make a service fail.
-+    [ -n "$AW_GCR" ] && i2cset -f -y "$AW_BUS" "$AW_ADDR" 0x11 "$AW_GCR" 2>/dev/null
-+    i2cset -f -y "$AW_BUS" "$AW_ADDR" 0x20 $_b i 2>/dev/null
-+    return 0
-+}
-+lit() {  # lit NAME: level NAME, turned down by LED_LEVEL when it is one of the v50 scheme's channels. That scheme
-+        # lights one channel at a time and never mixes two, so a field calibration of a colour that came out too
-+        # bright (or too dim) belongs here - with no rebuild, and no other device's LEDs touched.
-+    _lt_v=$(level "$1")
-+    if [ "$LED_LEVEL" != 100 ]; then
-+        case " $SCHEME_LEDS " in
-+            *" $1 "*) [ -n "$_lt_v" ] && _lt_v=$((_lt_v * LED_LEVEL / 100)) ;;
-+        esac
-+    fi
-+    echo "$_lt_v"
- }
- write() {  # write NAME 0|1: the LED itself
-+    case $1 in
-+        aw:*)
-+            aw_panel || return 0
-+            if [ "$2" = 1 ]; then aw_write "$1" "$(lit "$1")"; else aw_write "$1" 0; fi
-+            return 0 ;;
-+    esac
-     if [ ! -e "$LEDS/$1" ] && f=$(vendor_ldo "$1"); then echo "$2" > "$f" 2>/dev/null; return 0; fi
-     [ -w "$LEDS/$1/brightness" ] || return 0
-     echo none > "$LEDS/$1/trigger" 2>/dev/null
--    if [ "$2" = 1 ]; then level "$1"; else echo 0; fi > "$LEDS/$1/brightness" 2>/dev/null
-+    if [ "$2" = 1 ]; then lit "$1"; else echo 0; fi > "$LEDS/$1/brightness" 2>/dev/null
-     return 0
- }
- set_led() {  # set_led NAME 0|1: what it should show; lit only while awake
-     [ -n "$1" ] || return 0
-     has_led "$1" || return 0
-+    # the panel is one lamp, not three: only the colour it is showing may be remembered. Every write repaints all
-+    # sixteen registers, so a second remembered colour would not stack - it would overwrite, and whichever came
-+    # last in the directory order would win, not whichever the scheme chose.
-+    case $1 in aw:*) rm -f "$STATE"/aw:* 2>/dev/null ;; esac
-     mkdir -p "$STATE" 2>/dev/null && echo "$2" > "$STATE/$1" 2>/dev/null
-     if [ "$2" = 1 ] && ! shown; then write "$1" 0; else write "$1" "$2"; fi
- }
-@@ -88,6 +216,34 @@ wifi_band() {  # 5 or 2.4: the channel the hotspot runs on, else (it has none ye
-     if [ -n "$ch" ]; then [ "$ch" -gt 14 ] && echo 5 || echo 2.4
-     else "${MU300_BIN:-/opt/mu300/bin}/mu300-wifi-band" 2>/dev/null | sed -n 's/^hotspot: \([0-9.]*\) GHz$/\1/p'; fi
- }
-+v50() { [ "$SCHEME" = v50 ]; }
-+net() {  # net up|down|noservice: what the data events last said, then the colour that goes with it
-+    mkdir -p "$STATE" 2>/dev/null
-+    echo "$1" > "$STATE/.net" 2>/dev/null
-+    render
-+}
-+# render(): the v50 scheme's whole reason to exist. One colour out of two states, in one place, because the states
-+# are two separate streams: the network arrives as events from mobile-data, the band only by being looked up, and
-+# each command can change one of them without the other. Lit as it should be (only while awake), so the state
-+# machine above carries it like every other LED.
-+# The network wins over the band: red without service whatever the band is, because that is the one state a person
-+# has to do something about. Only "up" (a connected data bearer) counts as a network - not a ping of the outside,
-+# which would cost traffic and say nothing the modem did not already know.
-+render() {
-+    v50 || return 0
-+    if [ "$(cat "$STATE/.net" 2>/dev/null)" = up ]; then
-+        if [ "$(wifi_band)" = 5 ]; then _ron=$NET5; else _ron=$NET24; fi
-+    else _ron=$NO_NET; fi
-+    case $_ron in
-+        # the panel is repainted in one write of all sixteen registers, so clearing the other colours first would
-+        # only buy a black frame between them - the write that lights the new colour has already cleared the rest
-+        aw:*) ;;
-+        *) for _rl in $SCHEME_LEDS; do [ "$_rl" = "$_ron" ] || set_led "$_rl" 0; done ;;
-+    esac
-+    set_led "$_ron" 1
-+    mkdir -p "$STATE" 2>/dev/null && echo "$_ron" > "$STATE/.color" 2>/dev/null
-+    return 0
-+}
- show_all() {  # every LED as it should be (none while idle, unless a key woke them)
-     shown || return 0
-     for f in "$STATE"/*; do
-@@ -96,20 +252,30 @@ show_all() {  # every LED as it should be (none while idle, unless a key woke th
-     done
- }
- siren_running() { p=$(cat "$SIREN_PID" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
--nap() { sleep "$1" 2>/dev/null || sleep 1; }   # (a busybox without fractional sleep)
-+nap() {  # nap SECONDS: a short pause - a quarter of a second for the siren, a fraction for a flash.
-+    # Not every sleep here takes a fraction: OpenWrt's own busybox on this device answers "sleep: invalid number"
-+    # and stops, so a bare `sleep 0.25` silently becomes a whole second - the siren holds each colour four times
-+    # as long as it means to, and a key's "I heard that" flash takes four seconds to say it. The release's own
-+    # busybox is built with FANCY_SLEEP and does take it, so ask that one first; where it is not there, the
-+    # system's sleep is tried anyway, and a whole second is the last resort. (MU300_BB is for tests/.)
-+    _nb=${MU300_BB:-/opt/mu300/bin/busybox}
-+    if [ -x "$_nb" ]; then "$_nb" sleep "$1" 2>/dev/null && return 0; fi
-+    sleep "$1" 2>/dev/null || sleep 1
-+}
- 
- case "$1 ${2:-}" in
-     "power on")   set_led "$POWER" 1; [ "$TIMEOUT" = 0 ] || idle || exec "$0" wake ;;   # (a boot, not a key)
-     "power off")  set_led "$POWER" 0 ;;
--    "data on")    set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA5G" 0; set_led "$DATA" 1 ;;
--    "data 5g")    set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA" 0; set_led "$DATA5G" 1 ;;
--    "data off")   set_led "$NODATA" 0; set_led "$DATA5G" 0; set_led "$DATA" 0 ;;
--    "data error") set_led "$DATA" 0; set_led "$DATA5G" 0; set_led "$NODATA" 1 ;;
-+    "data on")    if v50; then net up; else set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA5G" 0; set_led "$DATA" 1; fi ;;
-+    "data 5g")    if v50; then net up; else set_led "$NODATA" 0; [ "$DATA5G" = "$DATA" ] || set_led "$DATA" 0; set_led "$DATA5G" 1; fi ;;
-+    "data off")   if v50; then net down; else set_led "$NODATA" 0; set_led "$DATA5G" 0; set_led "$DATA" 0; fi ;;
-+    "data error") if v50; then net noservice; else set_led "$DATA" 0; set_led "$DATA5G" 0; set_led "$NODATA" 1; fi ;;
-     "wifi on")
-         if [ "$WIFI5" = "$WIFI24" ]; then set_led "$WIFI5" 1
-         elif [ "$(wifi_band)" = 5 ]; then set_led "$WIFI24" 0; set_led "$WIFI5" 1
--        else set_led "$WIFI5" 0; set_led "$WIFI24" 1; fi ;;
--    "wifi off")   set_led "$WIFI5" 0; [ "$WIFI24" = "$WIFI5" ] || set_led "$WIFI24" 0 ;;
-+        else set_led "$WIFI5" 0; set_led "$WIFI24" 1; fi
-+        v50 && render ;;   # keyboard-backlight keeps meaning "the hotspot is up"; the RGB LED answers for the scheme
-+    "wifi off")   set_led "$WIFI5" 0; [ "$WIFI24" = "$WIFI5" ] || set_led "$WIFI24" 0; v50 && render ;;
-     "wifi sync")  # a running AP has its SSID in iw's answer; a stopped hostapd leaves "type AP" without one
-         # (a hotspot that LuCI turned on can take longer than any one moment to come up: S follows it a while)
-         n=${3:-0} last=
-@@ -129,7 +295,8 @@ case "$1 ${2:-}" in
-             echo $((now + t)) > "$STATE/.peek-until"
-         fi
-         [ "$TIMEOUT" = 0 ] || echo $((now + TIMEOUT)) > "$STATE/.awake-until"
--        show_all ;;
-+        show_all
-+        v50 && render ;;   # the band can have changed while the LEDs were dark (a key, a sync): settle on it again
-     "sleep "*)
-         if idle; then   # a key's wake in idle: dark again once it is over
-             if [ "${2:-}" = --if-due ] && shown; then exit 0; fi
-@@ -150,7 +317,7 @@ case "$1 ${2:-}" in
-         [ -z "$POWER" ] || write "$POWER" 0 ;;
-     "idle off")
-         rm -f "$STATE/.idle" "$STATE/.peek-until"
--        if awake; then show_all; fi ;;   # past the timeout they stay dark until the next wake
-+        if awake; then show_all; v50 && render; fi ;;   # past the timeout they stay dark until the next wake
-     "charge on")
-         [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
-         echo timer > "$LEDS/$POWER/trigger" 2>/dev/null
-@@ -160,7 +327,7 @@ case "$1 ${2:-}" in
-         [ -n "$POWER" ] && [ -w "$LEDS/$POWER/trigger" ] || exit 0
-         echo none > "$LEDS/$POWER/trigger" 2>/dev/null
-         write "$POWER" 0
--        if awake; then show_all; fi ;;
-+        if awake; then show_all; v50 && render; fi ;;
-     "alarm on")
-         siren_running && exit 0
-         mkdir -p "${SIREN_PID%/*}" 2>/dev/null
-@@ -172,7 +339,7 @@ case "$1 ${2:-}" in
-         rm -f "$SIREN_PID"
-         nap 0.2
-         for l in $SIREN; do write "$l" 0; done
--        if awake; then show_all; fi ;;   # the U30 Air's white is its power LED, the F50's colours its network LED
-+        if awake; then show_all; v50 && render; fi ;;   # the U30 Air's white is its power LED, the F50's colours its network LED
-     "siren "*)   # (alarm on runs this in the background)
-         # Only the siren named in the pid file runs: one left behind (its alarm switched off while it was
-         # between writes, a restarted service) stops by itself instead of flashing along with the new one.
-@@ -184,10 +351,28 @@ case "$1 ${2:-}" in
-             elif [ $n -gt 0 ]; then exit 0; fi
-             n=$((n + 1))
-             for on in $SIREN; do
--                for l in $SIREN; do [ "$l" = "$on" ] || write "$l" 0; done
-+                case $on in
-+                    # one write turns the whole panel over to the next colour; the others need clearing by hand
-+                    aw:*) ;;
-+                    *) for l in $SIREN; do [ "$l" = "$on" ] || write "$l" 0; done ;;
-+                esac
+@@ -372,6 +378,23 @@ case "$1 ${2:-}" in
                  write "$on" 1; nap 0.25
              done
          done ;;
-+    "flash "*)   # a key acted: say so while the change it made is still on its way (a band switch reloads Wi-Fi, which
-+        # takes seconds, and the colour that answers for it comes with the new channel). Only the v50 scheme has a
-+        # colour to flash with; elsewhere a key's wake already lit everything.
-+        v50 || exit 0
++    "flash "*)   # a key acted: say so while the change it made is still on its way (a band switch reloads
++        # Wi-Fi, which takes seconds, and the colour that answers for it comes with the new channel).
++        # Only the V50 has one lamp carrying every state, so only it has a colour to flash.
++        [ "$DEVICE" = v50 ] || exit 0
 +        shown || exit 0   # dark is dark: a flash is not a reason to light a device that is meant to be dark
-+        _fl=$(cat "$STATE/.color" 2>/dev/null)
++        _fl=
++        for l in "$NODATA" "$DATA" "$DATA5G"; do
++            [ -n "$l" ] || continue
++            [ "$(cat "$STATE/$l" 2>/dev/null)" = 1 ] && { _fl=$l; break; }
++        done
 +        [ -n "$_fl" ] || exit 0
 +        _fi=0
 +        while [ "$_fi" -lt "$KEY_FLASH_COUNT" ]; do
 +            write "$_fl" 0; nap 0.15
 +            write "$_fl" 1; nap 0.15
 +            _fi=$((_fi + 1))
-+        done
-+        render ;;
++        done ;;
      "test "*)
          for l in "$LEDS"/*; do
              n=${l##*/}
-@@ -195,6 +380,6 @@ case "$1 ${2:-}" in
-             old=$(cat "$l/brightness" 2>/dev/null)
-             echo "$n"; write "$n" 1; sleep 2; echo "${old:-0}" > "$l/brightness" 2>/dev/null
-         done ;;
--    *) sed -n '2,10s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
-+    *) sed -n '2,12s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
- esac
- exit 0
-diff --git a/rootfs/overlay/opt/mu300/bin/mu300-wifi-band b/rootfs/overlay/opt/mu300/bin/mu300-wifi-band
-index ccdcb65..e9ff62e 100755
---- a/rootfs/overlay/opt/mu300/bin/mu300-wifi-band
-+++ b/rootfs/overlay/opt/mu300/bin/mu300-wifi-band
-@@ -4,6 +4,9 @@
- #   mu300-wifi-band 2.4|5      switch to that band and restart the hotspot (kept across reboots)
- #   mu300-wifi-band toggle     the other one (the U30 Air's Wi-Fi key, see mu300-buttons)
- # The channel goes back to automatic: 5 GHz channels mean nothing on 2.4 GHz and the other way round.
-+# A switch tells mu300-led too, which shows the band in its v50 scheme (the V50's one LED says whether there is a
-+# network and which band at once); without a word from here the colour would still be the old band's until
-+# something else noticed.
- # Ubuntu: BAND and CHANNEL in /etc/mu300/hotspot.conf (hotspot-start). OpenWrt: wireless.radio0 in UCI.
- # (MU300_HOTSPOT_CONF is for tests/)
- CONF=${MU300_HOTSPOT_CONF:-/etc/mu300/hotspot.conf}
-@@ -37,6 +40,10 @@ UCI
-         new=$(sed -e "s/^BAND=.*/BAND=$1/" -e 's/^CHANNEL=.*/CHANNEL=auto/' "$CONF") && printf '%s\n' "$new" > "$CONF"
-         [ -n "${MU300_HOTSPOT_CONF:-}" ] || systemctl restart mu300-hotspot >/dev/null 2>&1 &
-     fi
-+    # The colour that answers for the band has to follow it (mu300-led's v50 scheme): nothing else is looking for
-+    # this change, and the reload above takes seconds - so it follows the hotspot as it comes back instead of
-+    # reading a band that is still the old one. In the background: a key press waits for this script, not for Wi-Fi.
-+    "${MU300_BIN:-/opt/mu300/bin}/mu300-led" wifi sync 30 </dev/null >/dev/null 2>&1 &
-     echo "hotspot: $1 GHz"
- }
- 
-diff --git a/rootfs/overlay/opt/mu300/bin/wifi-start b/rootfs/overlay/opt/mu300/bin/wifi-start
-index 3867c7d..e1d8e61 100755
---- a/rootfs/overlay/opt/mu300/bin/wifi-start
-+++ b/rootfs/overlay/opt/mu300/bin/wifi-start
-@@ -19,8 +19,7 @@ for m in wcn_bsp sprd_wlan_combo; do
-     [ -f "$f" ] || f=$K/extra/$m.ko
-     [ -f "$f" ] || { echo "missing $m.ko" >&2; exit 1; }
-     insmod "$f"
--done
--for n in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
-+donefor n in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
- # wcn_bsp turns the Marlin3 firmware (ARM) log on at boot; every firmware log packet is printed to the kernel log
- [ -w /proc/mdbg/at_cmd ] && printf 'at+armlog=0\r' > /proc/mdbg/at_cmd 2>/dev/null || true
- ls /sys/class/net
 diff --git a/tools/vendor-overlay.py b/tools/vendor-overlay.py
-index 6f41d05..8b3d7d3 100755
+index 035e3a8..b7e7622 100755
 --- a/tools/vendor-overlay.py
 +++ b/tools/vendor-overlay.py
-@@ -130,6 +130,47 @@ def add_members(tar, src: Path, dest: str, seen: set, rename=None):
+@@ -167,6 +167,47 @@ def add_members(tar, src: Path, dest: str, seen: set, rename=None):
      return n
  
  
@@ -3295,7 +3316,7 @@ index 6f41d05..8b3d7d3 100755
  def main():
      ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
      ap.add_argument('--os', required=True, choices=['ubuntu', 'openwrt', 'openwrt-luci'])
-@@ -168,6 +209,14 @@ def main():
+@@ -205,6 +246,14 @@ def main():
          if a.kernel_bundle:
              krel, n = add_kernel_bundle(tar, a.kernel_bundle, a.os, seen)
              print(f'{a.out}: {n} modules for {krel}')

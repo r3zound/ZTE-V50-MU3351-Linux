@@ -8,9 +8,9 @@
 |---|---|
 | 目标设备 | ZTE V50（`MU3351`，板型 `ums9620_2h10_feimao`） |
 | 上游项目 | [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)（MIT） |
-| 验证版本 | 上游 **v2026.10.12** + 本仓库 19 步补丁 |
+| 验证版本 | 上游 **v2026.10.23.2** + 本仓库 19 步补丁（自建镜像 **v2026.10.23.3**） |
 | 系统 | Android 13 + OpenWrt 25.12.5（`openwrt-luci` 面板版） |
-| 内核 | **5.4.254**（vendor 基线）或 **6.18.55**（主线，实测可用）。安装向导本来就会问，已装设备可 `mu300-update kernel` 就地切换、`rollback-boot` 回退。见 `docs/07-6.18内核与按键与监管域.md` |
+| 内核 | **7.3.0**（主线，2026-10-25 刷机实测可用）。上游**只给 V50 主线内核**（6.18 / 7.2 / 7.3），选 5.4 会被安装器直接拒绝。安装向导本来就会问，已装设备可 `mu300-update kernel` 就地切换、`rollback-boot` 回退。见 `docs/07-内核与按键与监管域.md` |
 | 风险 | 低。不动 `boot_a` / GPT / `userdata`；只写 Linux 区、`boot_b`、`misc` 的 32 字节 |
 
 ---
@@ -23,13 +23,13 @@
 | **USB 网络可选** | 切成 RNDIS 后 PC 出现网卡并拿到 LAN 地址，USB 也能上网 |
 | 实测吞吐 | 单流：USB RNDIS 上行约 **398 Mbps** / 下行约 **292 Mbps**；WiFi 约 **135 / 236 Mbps**。链路经实测确为 **USB 3.0 SuperSpeed**（`bcdUSB 0x0320` / `current_speed=super-speed`），但单条 TCP 流只能拿到 300–400 Mbps，想跑满要**多流并发**。测法与「一种会被 `nc` 循环伪装成"不扩展"的错测法」见 `docs/06-OpenWrt操作手册.md` 附录 |
 | **实体按键** | 短按：热点 **2.4GHz ↔ 5GHz**（闪 2 下确认）；按住 **10 秒**：重启设备，三色轮流闪到下电（V50 的键报 KEY_FN=464，上游只认 116/138，故原先无反应。见 §4.6） |
-| **指示灯** | **无外网=红 / 有网+5GHz=白 / 有网+2.4GHz=蓝**。面板彩灯是 I2C 上的 AW9523B，由 mu300-led 用户态直控（不是 sysfs 里的 sc27xx:*，那是背光）。切频段后自动跟随。F50/U30 Air 的原灯语不受影响，可配。见 §4.7 |
+| **指示灯** | **网络灯 = 当前 SIM 槽那一组灯，按接入技术显示（5G=白 / 4G=蓝 / 无服务=红）；WiFi 灯 = 5GHz 白 / 2.4GHz 蓝**。面板彩灯是 I2C 上的 AW9523B，由**上游主线内核的 `leds-aw9523b` 驱动**（不是 sysfs 里的 `sc27xx:*`，那是背光）。切频段后自动跟随。F50/U30 Air 的原灯语不受影响。见 §4.7 |
 | **无线国家码** | 默认 `US`：2.4GHz 允许 **30 dBm**（BO/CN 只有 20），且允许低段 5GHz 起 AP |
 | 管理 | `ssh root@192.168.77.1`；LuCI `http://192.168.77.1/cgi-bin/luci/` |
 | 一键切换 | 在 Android 侧一条命令进 OpenWrt；在 OpenWrt 里重启即回 Android |
 | 救砖通道 | USB 串口 COM12（115200）直接给 root shell，不怕网络配坏 |
 | 4G 共享 | 移动数据经 NAT 分给 WiFi / USB 客户端 |
-| 失败自保 | Linux 起不来会自动回 Android；连续失败 5 次也回 Android |
+| 失败自保 | 新写的启动镜像会先「试运行」一次，试运行期间连续失败 5 次才回 Android；确认能用后锁定，引导链不再自动回退 |
 
 ---
 
@@ -81,7 +81,7 @@ git clone https://github.com/dikeckaan/mu300-linux "$R\mu300-linux"
 
 ### 3.1 版本要匹配
 
-`tools\apply-v50-patches.ps1` 里的锚点是按上游 **v2026.10.12** 的行写的。
+`tools\apply-v50-patches.ps1` 里的锚点是按上游 **v2026.10.23.2** 的行写的。
 换版本前先看它跑完有没有 `MISS`：**任何一步 MISS 都必须人工确认**，别硬刷。
 
 ### 3.2 安装答案文件
@@ -96,7 +96,7 @@ yes      机型识别不是 F50，继续（补丁已认出 V50，这步一般不
 yes      导入 Android 的热点名与密码
 yes      包含 Mali GPU 文件
 no       不装额外组件
-1        内核：5.4（测试最久，最稳）
+4        内核：7.3（主线，2026-10-25 实测可用）
 update   安装模式：保留已有配置
 <root密码>      两遍，你自己定
 <root密码>
@@ -106,6 +106,11 @@ INSTALL  最终确认（必须是大写 INSTALL）
 **成功标志**：输出 `MU300-INSTALL-OK`，且安装日志里能看到
 `8 entries from ...\openwrt\vendor-extra`（说明补丁注入生效）。
 
+> ⚠️ **V50 不能选 5.4 内核**。上游 `install.sh` 对 V50 会直接拒绝：
+> 「The ZTE V50 runs a mainline kernel only: take the zip for kernel 6.18, 7.2 or 7.3 of this release」。
+> 菜单是 `1=5.4 / 2=6.18 / 3=7.2 / 4=7.3`，**V50 的默认项是 2（6.18）**。
+> 本仓库 2026-10-25 的实测用的是 **7.3**。
+
 > ❌ **不要设置环境变量 `MU300_USBNET`**。它按环境变量语义工作，写在 boot 镜像命令行上无效，
 > 而且会破坏 Android 侧对 Linux 镜像的识别，导致**再也切不进 Linux**。要 RNDIS 请看第 5.3 节。
 
@@ -113,7 +118,22 @@ INSTALL  最终确认（必须是大写 INSTALL）
 
 ## 4. 必须打的补丁，以及不打会怎样
 
-上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 19 步：
+上游对 V50 有 4 个会直接导致"刷完不能用"的缺陷。`tools\apply-v50-patches.ps1` 共 19 步。
+
+> **上游自己已经原生支持 V50 了**（v2026.10.23.2 起）：SIM mux 与四板型卡映射
+> （`port/drivers/misc/zte-v50-sim.c`、`rootfs/overlay/opt/mu300/lib/v50-card.sh`）、
+> **主线内核的 AW9523B 面板灯驱动**（`port/drivers/leds/leds-aw9523b.c`）、
+> 按设备树认出 V50 的 `mu300-device`（`v50_dt()` / `v50_fix()`）。
+>
+> 所以这 19 步解决的是**上游还没覆盖的那部分**，其中真正属于「上游没有、只有我们补」的只有 3 处：
+>
+> | 我们补的 | 上游缺什么 | 不补会怎样 |
+> |---|---|---|
+> | `mu300-led flash`（+ `LED_KEY_FLASH_COUNT`） | 上游只有 `alarm`（三色轮闪），没有「闪一下」这个动作 | 短按切频段要 `wifi reload`、颜色几秒后才变，**按键看起来像没反应** |
+> | `mu300-buttons` 认 `KEY_FN=464` + 长按 10 秒 | 上游只认 `KEY_POWER=116` / `KEY_WIFI=138`（U30 Air 的键），**V50 一个都不报** | V50 唯一的实体键完全没反应 |
+> | `init.d/mu300-buttons` 补 `stop_service()` | 上游这个脚本没有它，`restart` 停不掉旧实例 | 第二个 `mu300-keys` 同时读同一个 gpio-keys，**每次按键被处理两遍**（切频段切两次等于没切） |
+>
+> 其余 16 步在 v2026.10.12 时代就写好，v2026.10.23.2 上**仍然必要**（逐条核对过）。
 
 | 步 | 修什么 | 不打会怎样 |
 |---|---|---|
@@ -137,7 +157,7 @@ INSTALL  最终确认（必须是大写 INSTALL）
 | 17 | **apk 软件源指向清华 TUNA 镜像** | 4G 下官方源慢 2.25 倍；换成阿里云则**根本装不了包**（见 §4.3） |
 | 17b | 把上面改过的文件镜像进 `openwrt/vendor-extra/`（**必须在所有内容修改之后**） | 预编译安装只读 vendor-extra，镜像早了就发出去未修补的版本（见 §4.5） |
 | 18 | 编码硬门禁（UTF-16 / BOM / CRLF 直接报错） | 把坏文件发到设备上才发现 |
-| 19 | **灯光方案一致性门禁**（三个脚本的互相调用 + 必须进 vendor-extra） | 半套方案**全是静默失效**：按键调一个 `mu300-led` 没有的子命令，只是打印用法然后什么也不做 |
+| 19 | **灯光方案一致性门禁**（v50 方案跑在主线 `leds-aw9523b` 上 + 按键的 flash + 必须进 vendor-extra） | 半套方案**全是静默失效**：按键调一个 `mu300-led` 没有的子命令，只是打印用法然后什么也不做 |
 
 ### 4.1 第 15 步：为什么 DNS 那一栏永远是 `--`
 
@@ -265,61 +285,55 @@ HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && 
 > 按键"没反应"时，先看 `/run/mu300/power/state` 是否 `active`、`mu300-power daemon` 是否在跑 ——
 > 上游逻辑里 **idle 状态下的第一次按下只唤醒、不执行动作**，别一上来就怀疑键码。
 
-完整记录（含 6.18/7.2 内核切换与回退）见 `docs/07-6.18内核与按键与监管域.md`。
+完整记录（含 6.18/7.2/7.3 内核切换与回退）见 `docs/07-内核与按键与监管域.md`。
 
-### 4.7 指示灯：无外网=红，有网+5GHz=白，有网+2.4GHz=蓝
+### 4.7 指示灯：网络灯按接入技术，WiFi 灯按频段
 
-V50 面板上的彩灯**不在 `/sys/class/leds` 里**。它是 I²C 总线 `i2c-3` 上的一颗 **Awinic AW9523B**
-（`0x5b`，设备树 `/soc/ap-ahb/i2c@2270000/aw9523b_led@5b`），Android 侧由厂商模块 `aw9523b.ko` 驱动。
-那个模块**搬不到本项目的内核上**（vermagic 不匹配且开了 modversions），所以本方案改成
-**`mu300-led` 从用户态用 `i2cset` 直接驱动芯片** —— 不改内核、不写模块。
+V50 面板上的彩灯是 I²C 总线 `i2c-3` 上的一颗 **Awinic AW9523B**
+（`0x5b`，设备树 `/soc/ap-ahb/i2c@2270000/aw9523b_led@5b`）。
 
-| 有无外网 | 频段 | 灯 | 寄存器掩码 |
-|---|---|---|---|
-| **无** | 任意 | **红** | `0x2894` |
-| 有 | 5 GHz | **白** | `0xffff`（红+绿+蓝同亮） |
-| 有 | 2.4 GHz | **蓝** | `0x9442` |
+**驱动它的是上游主线内核的 `leds-aw9523b`**（上游 v2026.10.23.2 的
+`port/drivers/leds/leds-aw9523b.c`），不是我们写的用户态 I²C 直控。设备上的实测：
 
-掩码取自**原厂设备树**的 `aw9523b,idx`（厂商自己的接线定义），三者并集 `0xffff`、互不重叠。
+```
+aw9523b-led 3-005b: 4 LED groups, pin mask 0xffff
+```
 
-> **踩过的坑（已更正过一次错误结论）**：早先的版本把这三路写成 PMIC 的 `sc27xx:*` 并宣布"实测通过"。
-> 那是错的 —— `sc27xx:*` 是 **PMIC 背光控制器**（`led-controller@180`），在 V50 上**不驱动任何可见灯珠**，
-> 往它写 0/255 画面毫无变化。当时验的是寄存器回读值，而那三路从未点亮过一颗灯。
-> **寄存器回读对 ≠ 灯亮了**：灯光验证必须以肉眼为准。
-> 详见 `docs/08-灯光效果方案.md` 第〇节。
+灯在 sysfs 里是**一类一个语义灯**，不是一组寄存器位：
 
-- **「有无网」的判据 = 调制解调器数据已连接**（`mobile-data` 的 `data on`/`data 5g` 事件），
-  **不去 ping 外网**，不产生额外流量与延迟。注意它**不等于真的能上外网**（DNS 坏、路由坏时它照样是白/蓝）。
-- **红优先**：三个状态里只有"没网"需要人处理，所以它盖过频段（无网 + 2.4GHz 显示红，不显示蓝）。
-- **切频段后颜色自动跟随** —— 这是补丁里 `mu300-wifi-band` 补的那一句 `mu300-led wifi sync`。
-  没有它，颜色会一直停在刚切走的那一档。
-- **一次 `i2cset` 点亮整块面板**：16 个调光寄存器地址连续，芯片接受 I²C block 连续写
-  （`i2cset -f -y 3 0x5b 0x20 <16 字节> i`，注意 mode 字母在最后）。所以改色不必先关别的颜色。
-- **F50 / U30 Air 完全不受影响**：方案由 `LED_SCHEME=v50` + `LED_BACKEND=i2c` 打开，默认是 `classic`（原灯语）。
+| 类名 | max | 含义 |
+|---|---|---|
+| `v50:net1:{blue,red,white}` | 120 / 120 / 80 | **SIM 槽 1** 的网络灯组 |
+| `v50:net2:{blue,red,white}` | 120 / 120 / 80 | **SIM 槽 0** 的网络灯组 |
+| `v50:wifi:{blue,red,white}` | 120 / 120 / 80 | WiFi 灯组 |
+| `aw9523b:pin0` … `pin15` | 80 / 120 | 原始 16 路（**DIM 寄存器序号，不是引脚号**） |
 
-改颜色 / 亮度不用重新编译，改 `/etc/mu300/led.conf` 即可（三个掩码、`LED_I2C_GCR` 电流档
-`0`=37mA/`1`=27.75mA/`2`=18.5mA/`3`=9.25mA、`KEY_FLASH_COUNT`、`LED_LEVEL` 百分比）。
-**想把灯变回 F50 原来的样子**：注释掉 `LED_BACKEND=i2c` 那行。
+灯语（上游 `mu300-led` 的 v50 分支，`$V50_NET` 由 `/run/mu300/sim-slot` 决定）：
 
-> **`LED_AW_WHITE_LEVEL` 为什么是白色专用的一个值**：白色不是第四种颜色，是红+绿+蓝同时亮。每颗 LED
-> 各自只吃自己那一路的电流，但眼睛看到的是三个发光体叠加，所以同样的 DIM 值下白色明显比单色亮。
-> 这个值就是用来把白色压回和红/蓝同一水平的。本机从 100% 一路走到 **10%** 才定下来（夜间安静的白、
-> 仍看得出是白）。改它只需一行 + `mu300-led data on`，不用重编译。
+| 条件 | 灯 |
+|---|---|
+| 当前卡 **4G** | `v50:net2:blue` |
+| 当前卡 **5G** | `v50:net2:white` |
+| **无服务** | `v50:net2:red` |
+| 热点 **5 GHz** | `v50:wifi:white` |
+| 热点 **2.4 GHz** | `v50:wifi:blue` |
 
-四个只有实施时才会撞上、且已修的问题（完整说明见 `docs/08-灯光效果方案.md` 第七节）：
+> **和旧文档不一样**：旧方案是「无外网=红 / 有网+5GHz=白 / 有网+2.4GHz=蓝」，红优先。
+> 新方案里**红只表示无服务**，`data off`（调制解调器断开数据）是**灭**。
+> 这不是我们改的语义，是**上游按 ZTE 原厂固件**定的（上游注释标为 FINDINGS 199，
+> V50 B15 的 `NotificationManagerService.setNetLight`）：
+> 网络灯说的是「这张卡现在在什么制式」，不是「有没有外网」。
 
-1. **`i2c-dev` 是模块且没人加载它** —— 引用计数为 0，重启后 `/dev/i2c-3` 不存在，灯光会**毫无报错地保持全黑**。
-   `mu300-led` 现在自己 `modprobe`（已用 `rmmod` → 运行 → 自动恢复实测）。
-2. **开机没人画第一次灯** —— 只有网络事件才重绘，modem 报告前面板全黑像坏了。
-   `init.d/mu300-buttons` 的 `start_service()` 现在画一次（开机先红，连上后转白/蓝）。
-3. **设备的 `sleep` 不吃小数秒** —— OpenWrt 自带 busybox 直接报 `sleep: invalid number`，
-   上游 `mu300-led nap()` 的兜底把 0.15 秒变成整整 1 秒：**闪 2 下会变成 4 秒**。
-   已改成优先用发布版自带的 busybox（带 `FANCY_SLEEP`）。
-4. **编码门禁（第 18 步）从来没检查过任何文件** —— `Get-ChildItem -Recurse -File -Path "$tree\*"`
-   在 PowerShell 5.1 下返回 **0 个文件**，门禁却每次打印"ok"。一个带 BOM/CRLF 的脚本照样会发到设备上。
-   已修，并注入 BOM 做反向测试确认它现在会失败。
+我们相对上游只加了 `mu300-led flash`（按一下键闪 2 下作为「收到了」的回执，
+次数由 `led.conf` 的 `LED_KEY_FLASH_COUNT` 决定）—— 因为切频段要 `wifi reload`，
+颜色要等新信道回来才变，不先闪一下按键看起来就像没反应。
 
-完整实测记录（**逐条肉眼确认**，含寄存器布局、掩码换算与退路）见 `docs/08-灯光效果方案.md`。
+> ⚠️ **寄存器回读 ≠ 灯亮了**：灯光这类「给人看」的输出，回读只能用来**排除故障**
+> （比如读芯片 ID `0x23`），不能用来**证明成功**。宣布「灯生效了」之前，
+> 必须让人**用眼睛**看过面板。详见 `docs/08-灯光效果方案.md` 第〇节
+> ——那里记着两次公开的结论更正。
+
+完整实测记录（含寄存器布局、掩码换算、两次结论更正与退路）见 `docs/08-灯光效果方案.md`。
 
 ---
 
@@ -426,9 +440,45 @@ ssh -i $env:USERPROFILE\.ssh\id_ed25519 root@192.168.77.1
 
 ## 7. 两个系统的切换
 
-**关键认知**：在 OpenWrt 里点重启**必然回 Android**，这是设计而非故障。
-Linux 启动早期就自己把 Android 的 boot 控制块写回 misc，所以 **Linux 是一次性试用** ——
-每次进 Linux 都必须从 Android 侧再切一次。
+**默认启动项决定重启去哪。** 本仓库 2026-10-25 的实测配置把默认启动改成了 **Linux**
+并**锁定**了 Linux 槽位，所以**在 OpenWrt 里点重启会回到 OpenWrt**，不是 Android。
+
+设备上的实际状态（`mu300-next-boot status`）：
+
+```
+default boot: linux
+locked: yes (Android only by hand)
+failed boots in a row before Android: 5 (only while a new boot image is on trial)
+boots since the last good one: 0
+misc bootloader_control: 5f62000042434142010200009e00ef0000000000000000000000000088e09eaf
+  slot a info: 9e  slot b info: ef  (prio | tries<<4 | successful<<7)
+```
+
+读法：`slot b`（Linux）prio=15 高于 `slot a`（Android）prio=14，两槽的 `successful` 位都是 1
+→ **引导链进 Linux**。
+
+> ⚠️ **「在 OpenWrt 里点重启必然回 Android」是旧版上游的语义，不是现在的。**
+> 上游 v2026.10.23.2 的 `mu300-next-boot` 加了 `lock` / `unlock`：
+> `lock` 把 Linux 槽的 `successful` 置 1，**引导链永不回退**，Android 只能手动切；
+> `unlock` 才是把回退权交回去。旧版本里 `--rearm` 与「Switch to Android」会互相覆盖，
+> 上游为此把 misc 的写操作串行化（`flock`）并让 `set_conf` 原子写。
+>
+> **两条兜底都要讲清楚**：
+>
+> 1. **写新的启动镜像会先解锁、试运行一次**（`--trial`）—— 万一新内核起不来，设备还能自己回来。
+> 2. **「连续失败 N 次回 Android」只在试运行期间生效**。锁定之后这个计数不再起作用。
+>    锁定状态记在 Linux 盘的 `.mu300/boot-lock`。
+>
+> 想回 Android 用上游的命令，不要直接改 misc：
+
+```sh
+mu300-next-boot status     # 先看当前状态
+mu300-next-boot android    # 切回 Android（上游语义里这是永久的，不会自己回来）
+mu300-next-boot unlock     # 交回回退权：之后连续失败 N 次就回 Android
+mu300-next-boot lock       # 锁定：引导链永不回退
+```
+
+从 Android 侧切进 Linux（先看状态，再切）：
 
 ```powershell
 # 从 Android 切进 OpenWrt（先看状态，再切）
@@ -458,8 +508,8 @@ docs/
   04-WiFi与DHCP根因分析.md   三个根因的完整证据链（WiFi 不广播 / DHCP 拿不到 IP / 路由冲突）
   05-一键复刻指南.md         分阶段清单式复刻步骤 + 验收清单
   06-OpenWrt操作手册.md      刷完后的日常操作（各通道、坑、能力清单）
-07-6.18内核与按键与监管域.md 6.18/7.2 内核切换（含 rollback）、5GHz 监管域根因、实体按键键码与映射
-08-灯光效果方案.md         灯语表、三态实现、实测结果、两个只有实施时才发现的坑与退路
+  07-内核与按键与监管域.md   6.18/7.2/7.3 内核切换（含 rollback）、5GHz 监管域根因、实体按键键码与映射
+  08-灯光效果方案.md         灯语表、内核驱动方案、实测结果、两次公开的结论更正与退路
 tools/
   apply-v50-patches.ps1     19 步补丁（幂等，含编码与灯光门禁）★核心
   backup-v50-partitions.ps1 28 分区备份 + sha256 校验
@@ -473,10 +523,11 @@ tools/
   led-scheme-test.sh        灯光方案的无设备回归测试（假 sysroot）★
   led-probe.sh              设备侧：报告三色与当前网络/频段状态（不用眼睛也能确认点亮了哪路）
   buttons-audit.sh          设备侧：数有几个按键读取进程（多于 1 就是 §4.6 那个坑）
+  ubus-remote-test.py       PC 端：LuCI 的 ubus JSON-RPC 远程接入链路自检（4 件事）
 plugins/
   ufi-tools-restart-to-openwrt.js   UFI-TOOLS 一键切换插件
 patches/
-  v50-changes-vs-upstream-v2026.10.12.patch   对上游的完整改动（LF，可 git apply）
+  v50-changes-vs-upstream-v2026.10.23.2.patch   对上游的完整改动（LF，可 git apply；新增脚本带可执行位）
 probe/
   可行性探测脚本（GPT / 空间 / 硬件探测）
 ```
@@ -497,11 +548,13 @@ probe/
 - **无显示输出**（USB-C 的 PD 芯片不应答）—— 无头设备，靠 SSH / 网页 / 串口
 - **无声音**（无喇叭无麦克风）
 - **无 SD 卡槽** —— 只能装 eMMC 空闲区（32.4 GiB，完全够用）
-- **V50 的面板彩灯不在 sysfs 里** —— 它是 I²C `i2c-3` 上的 AW9523B，Android 用 `aw9523b.ko` 驱动，
-  该模块在本项目内核上装不了（vermagic 不匹配 + modversions），Linux 侧改由 `mu300-led` 用户态直控
-  （`LED_BACKEND=i2c`）。所以 `mu300-led test` 遍历 sysfs 时点不到它，属外观问题，不影响网络与数据。
+- **面板彩灯只有主线内核点得着** —— 它是 I²C `i2c-3` 上的 AW9523B，Android 用 `aw9523b.ko` 驱动，
+  该模块在本项目内核上装不了（vermagic 不匹配 + modversions）。**主线内核自带 `leds-aw9523b`**，
+  所以 6.18 / 7.2 / 7.3 上灯是内核驱动的（`v50:net*` / `v50:wifi:*`），5.4 上一个都没有。
+  这也是上游**只给 V50 主线内核**的原因之一。
 - **纯 WPA3 不支持**（该 WiFi 驱动无 SAE）
-- 6.18 内核偶发启动挂死（约 1/20，会自动回 Android）→ 首次建议用 **5.4**
+- 6.18 内核偶发启动挂死（约 1/20）。**7.3 于 2026-10-25 实测正常，但样本只有一次**。
+  V50 装不了 5.4（上游直接拒绝），所以没有更保守的退路，只能靠 `mu300-next-boot` 的失败计数
 
 ---
 
@@ -524,14 +577,24 @@ probe/
 | 改了 `openwrt/overlay/` 却毫无效果 | 预编译安装只认 vendor-extra 通道 | 4.2 |
 | 装上去的脚本不执行 | 编码问题 | `tools\audit-repo-encoding.ps1` |
 | 安装报 `ALREADY-MOUNTED loop32` | 上次挂载没卸载 | 06 手册第 6 节 |
+| **安装向导在 V50 上拒绝 5.4 内核** | 上游只给 V50 主线内核（6.18 / 7.2 / 7.3） | 菜单 `1=5.4 / 2=6.18 / 3=7.2 / 4=7.3`，V50 的默认项是 2 |
+| **装完重启没进 OpenWrt，回了 Android** | 写新启动镜像会先解锁试运行一次（`--trial`），失败计数只在试运行期间生效 | `mu300-next-boot status` 看 `default boot` 与 `locked` |
+| 面板灯全黑（主线内核） | 灯在内核驱动上，先看驱动绑上没有 | `dmesg \| grep aw9523b` 应有 `aw9523b-led 3-005b: 4 LED groups` |
 
 ---
 
 ## 11. 命名约定与设备身份 —— 为什么内部仍叫 mu300
 
 **V50（`MU3351`）与 F50（`MU300`）是同一块板**：`ro.hardware` 都是 `ums9620_2h10_feimao`，
-SoC 同为 UMS9620 / T760，内核基线同为 5.4.254。所以上游对 F50 的支持**直接适用**，
+SoC 同为 UMS9620 / T760。所以上游对 F50 的支持**直接适用**，
 `DEVICE=f50` 是**正确且经过实测**的路径 —— 补丁第 1 步只是让机型识别认下 `V50` / `MU3351`。
+
+> **上游从 v2026.10.23.2 起原生支持 V50**：SIM mux（`port/drivers/misc/zte-v50-sim.c`）、
+> 四板型卡映射（`rootfs/overlay/opt/mu300/lib/v50-card.sh`）、
+> 面板灯的内核驱动（`port/drivers/leds/leds-aw9523b.c`）、
+> 按设备树认出 V50 的 `mu300-device`（`v50_dt()` / `v50_fix()`）。
+> 也就是说**上游自己也把这个设备叫 mu300** —— 下面那张「内部标识一律沿用 mu300」的表，
+> 在上游那边是同样的选择，不是本项目发明的分叉。
 
 **内部标识一律沿用上游的 `mu300` 命名，这是有意的，不是遗漏。** 这些名字不是标签，而是已经
 落地的关联契约，有些还是唯一的恢复通道：

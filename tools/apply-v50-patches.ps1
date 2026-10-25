@@ -1,4 +1,4 @@
-# Re-apply the V50 port patches to a fresh checkout of dikeckaan/mu300-linux.
+﻿# Re-apply the V50 port patches to a fresh checkout of dikeckaan/mu300-linux.
 # Run once, after `git clone`, before running install.ps1.
 #
 # Eighteen steps, all idempotent (each one checks for its own marker first). Steps 1-15 patch
@@ -997,13 +997,20 @@ Write-Host "=== 19. gate: the key, its colours and its reader are all in place =
 # colour stays on the band that was just switched away from. And a file missing from the vendor overlay is
 # the one failure that only shows on a PREBUILT install, months later, on somebody else's device.
 # So: check the calls exist, check the branches they call exist, and check all three are mirrored.
+#
+# The scheme itself changed with the kernel. Until v2026.10.23.2 the V50's panel was driven from userspace
+# (our own AW9523B i2c backend, led.conf with LED_SCHEME/LED_BACKEND/LED_I2C_*/LED_AW_* masks): that was
+# needed for the 5.4 vendor kernel, whose aw9523b.ko cannot be carried over to a mainline kernel. The
+# mainline kernels (6.18, 7.2, 7.3) carry drivers/leds/leds-aw9523b, so upstream drives the panel through
+# the kernel and this port no longer needs the i2c backend - and must not have it: two drivers on one chip
+# fight over it. The gate below therefore checks the kernel-driven scheme, and the mask arithmetic is gone
+# with it (there are no masks any more: the kernel names the lamps).
 $ledTree = "$Repo\rootfs\overlay\opt\mu300\bin"
 $ledChecks = @(
-    @{ File = "$ledTree\mu300-led";      Have = @('"flash "*)', '"data on")', 'render() {', 'aw_mask()', 'aw_write()', 'aw_panel()', 'modprobe i2c-dev');                     Want = 'the scheme itself: render(), the flash branch, and the AW9523B i2c backend' },
-    @{ File = "$ledTree\mu300-buttons";  Have = @('mu300-led flash', 'mu300-led alarm on');                    Want = 'the V50 key: a flash on the press, the siren on the hold' },
-    @{ File = "$ledTree\mu300-wifi-band"; Have = @('mu300-led" wifi sync');                                    Want = 'a band switch telling the LED which band it is' },
-    @{ File = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"; Have = @('LED_SCHEME=v50', 'LED_BACKEND=i2c', 'LED_I2C_BUS=', 'LED_I2C_ADDR=', 'LED_I2C_GCR=', 'LED_AW_RED=', 'LED_AW_GREEN=', 'LED_AW_BLUE=', 'LED_AW_WHITE_LEVEL=', 'NO_NET_CHANNEL=aw:red', 'NET5_CHANNEL=aw:white', 'NET24_CHANNEL=aw:blue');                  Want = 'the v50 scheme on the AW9523B: backend, bus, the three colour masks and white''s own level' },
-    @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()', 'mu300-led data on');  Want = 'one key reader, and the panel drawn once per boot' }
+    @{ File = "$ledTree\mu300-led";      Have = @('v50)', '"flash "*)', 'KEY_FLASH_COUNT', 'write "$_fl"'); Want = 'the v50 scheme on the mainline leds-aw9523b driver, and the flash branch the key needs' },
+    @{ File = "$ledTree\mu300-buttons";  Have = @('KEY_FN=464', 'mu300-led flash', 'mu300-led alarm on'); Want = 'the V50 key: a flash on the press, the siren on the hold' },
+    @{ File = "$ledTree\mu300-device";   Have = @('aw9523b_led@5b', 'v50_fix'); Want = 'the V50 told by its device tree, not by the label an older installer wrote' },
+    @{ File = "$Repo\openwrt\overlay\etc\init.d\mu300-buttons"; Have = @('stop_service()'); Want = 'one key reader: without the stop the key is read twice after every restart' }
 )
 $ledBad = @()
 foreach ($c in $ledChecks) {
@@ -1027,30 +1034,10 @@ foreach ($n in @('mu300-led', 'mu300-wifi-band', 'mu300-buttons')) {
     $dst = "$Repo\openwrt\vendor-extra\opt\mu300\bin\$n"
     if (-not (Test-Path $dst)) { $ledBad += "  openwrt/vendor-extra/opt/mu300/bin/$n  ->  not mirrored yet (step 17b did not run)" }
 }
-# The three colour masks are arithmetic, not text: each is one bit per dimming register, and a typo does not fail
-# loudly - it lights the wrong LEDs or leaves half the panel off. What has to hold is that the three together are
-# exactly the 16 registers, each claimed once. That is checkable here and is not checkable anywhere else.
-$conf90 = "$Repo\openwrt\overlay\etc\uci-defaults\90-mu300"
-if (Test-Path $conf90) {
-    $c90 = [IO.File]::ReadAllText($conf90)
-    $masks = @{}
-    foreach ($k in @('RED', 'GREEN', 'BLUE')) {
-        $mm = [regex]::Match($c90, "(?m)^LED_AW_$k=0x([0-9a-fA-F]+)\s*$")
-        if (-not $mm.Success) { $ledBad += "  LED_AW_$k  ->  missing or not a hex mask in 90-mu300" }
-        else { $masks[$k] = [Convert]::ToInt32($mm.Groups[1].Value, 16) }
-    }
-    if ($masks.Count -eq 3) {
-        $seen = 0; $overlap = $false
-        foreach ($k in $masks.Keys) { if ($seen -band $masks[$k]) { $overlap = $true }; $seen = $seen -bor $masks[$k] }
-        if ($overlap) { $ledBad += ('  the three masks overlap  ->  some LED would be driven by two colours at once') }
-        if ($seen -ne 0xffff) {
-            $unlit = 0
-            for ($b = 0; $b -lt 16; $b++) { if (-not ($seen -band (1 -shl $b))) { $unlit++ } }
-            $ledBad += ('  the three masks cover 0x{0:x4}, not 0xffff  ->  {1} dimming register(s) would never light' -f $seen, $unlit)
-        }
-        else { Write-Host '  checked: the three colour masks cover all 16 dimming registers, none claimed twice' }
-    }
-}
+# The three colour masks are gone with the i2c backend: the mainline driver names the lamps itself
+# (v50:net2:blue, v50:net2:white, v50:net2:red, v50:wifi:white, v50:wifi:blue), so there is no mask
+# arithmetic left to check - the wrong lamp name is the only mistake left, and the gate above checks
+# that the scheme and the key's flash are in the same file.
 if ($ledBad) {
     Write-Host "  FAIL: the LED scheme is not whole:"
     $ledBad | ForEach-Object { Write-Host $_ }

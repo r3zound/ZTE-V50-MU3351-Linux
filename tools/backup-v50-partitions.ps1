@@ -1,4 +1,4 @@
-# Reliable partition dump for the V50 (Windows equivalent of mu300-linux tools/backup-device.sh).
+﻿# Reliable partition dump for the V50 (Windows equivalent of mu300-linux tools/backup-device.sh).
 #
 # Three failure modes this had to get right, all learned on this device:
 #  1. A shell command with no output returns $null; calling .Trim() on it throws and kills the loop.
