@@ -1,0 +1,148 @@
+diff --git a/openwrt/overlay/etc/init.d/mu300-buttons b/openwrt/overlay/etc/init.d/mu300-buttons
+index 440af97..d0d00c2 100755
+--- a/openwrt/overlay/etc/init.d/mu300-buttons
++++ b/openwrt/overlay/etc/init.d/mu300-buttons
+@@ -1,6 +1,7 @@
+ #!/bin/sh /etc/rc.common
+ # the buttons: power wakes the LEDs (held: shut down), the U30 Air's Wi-Fi key switches the hotspot band
+-# (see /opt/mu300/bin/mu300-buttons)
++# (see /opt/mu300/bin/mu300-buttons). The V50 has one key instead (KEY_FN 464): a press switches the band,
++# a 10 s hold reboots.
+ START=95
+ USE_PROCD=1
+ export PATH="$PATH:/opt/mu300/busybox-bin"
+@@ -12,3 +13,21 @@ start_service() {
+ 	procd_set_param respawn 3600 10 0
+ 	procd_close_instance
+ }
++
++stop_service() {
++	# Without this, stop - and every restart - leaves the old instance running: rc.common has no stop of its
++	# own for a procd instance, so nothing ever reaches it. A second mu300-keys then opens the same gpio-keys,
++	# and every key press is handled twice: a band switch twice over is no switch at all, so the key looks
++	# dead while everything it controls works. Measured on the V50, 2026-10-10: two readers after one restart.
++	#
++	# procd only knows /opt/mu300/bin/mu300-buttons. mu300-keys is that script's child and it is the one that
++	# reads the input device, so it is found by name in /proc rather than signalled through procd.
++	#
++	# cat, not `< "$d/cmdline"`: a process that exits between the glob and the read makes the shell's own
++	# redirection fail, and rc.common stops on it - which showed up here as a restart that died halfway.
++	for d in /proc/[0-9]*; do
++		case "$(cat "$d/cmdline" 2>/dev/null | tr '\0' ' ')" in
++		*mu300-keys*|*"/opt/mu300/bin/mu300-buttons"*) kill "${d#/proc/}" 2>/dev/null ;;
++		esac
++	done
++}
+diff --git a/rootfs/overlay/opt/mu300/bin/mu300-buttons b/rootfs/overlay/opt/mu300/bin/mu300-buttons
+index e7b7a1f..00ef288 100755
+--- a/rootfs/overlay/opt/mu300/bin/mu300-buttons
++++ b/rootfs/overlay/opt/mu300/bin/mu300-buttons
+@@ -5,6 +5,8 @@
+ #                             in the charging boot it starts the device instead, as in the stock charger mode
+ #   Wi-Fi key, short press    hotspot 2.4 <-> 5 GHz (U30 Air; the Wi-Fi LED: white 5, blue 2.4, FINDINGS 152)
+ #   Wi-Fi key, held 3 s       hotspot off / on
++#   function key, short press hotspot 2.4 <-> 5 GHz, with the colour flashing (mu300-led flash; the V50's one key)
++#   function key, held 10 s   reboot, all three colours flashing (mu300-led alarm) until the power goes
+ # Every press lights the LEDs first (`mu300-led wake`: also in mu300-power's idle, and without any daemon), so a key
+ # always shows life. Then it wakes mu300-power with the key's name (`mu300-power wake wifi|power`; other keys count as
+ # power), in the background: the wake restores whatever is down by looking (hotspot, modem, LEDs, CPU), which can
+@@ -21,12 +23,23 @@
+ export PATH="$PATH:/opt/mu300/bin:/usr/sbin:/sbin"
+ KEY_POWER=116
+ KEY_WIFI=138   # "Wifi Switch Key" in the U30 Air's device tree (KEY_HELP's code, as its Android maps it)
++# The V50's board has ONE key and it is neither of the two above: its device tree calls it key-function
++# with linux,code 0x1d0 = 464 = KEY_FN. Nothing matched that code, so on this device every press fell
++# through the case below and did nothing at all - no band switch, no reboot. Measured, 2026-10-10:
++#   114 KEY_VOLUMEDOWN | 115 KEY_VOLUMEUP | 190 KEY_F20 (key-power) | 464 KEY_FN (key-function)
++KEY_FN=464
+ is_openwrt() { [ -e /etc/openwrt_release ]; }
+ PST=${MU300_RUN:-/run}/mu300/power
+ LEDIDLE=${MU300_SYSROOT:-}/run/mu300/led/.idle   # mu300-led idle on (mu300-led keeps its state there)
+ 
+ DEADLINE=${MU300_BUTTONS_DEADLINE:-150}   # a toggle in the background (the LED sync after wifi up runs 120 s)
+ 
++# How long a hold is, before it is reported as "long" (mu300-keys -l). 10 s on the V50, whose single
++# key reboots the device; the upstream 3 s everywhere else, for the F50/U30 Air power key. Told by the
++# device tree and not by the model: the V50 reports the same one as the F50 (DEVICE=f50), so the model
++# cannot tell them apart, and key-function is exactly the node that only this board has.
++HOLD=${MU300_BUTTONS_HOLD:-$([ -d /proc/device-tree/gpio-keys/key-function ] && echo 10000 || echo 3000)}
++
+ # --- deadlines (as in mu300-power): "PID PPID" for every process, a process tree killed, a job with a watchdog
+ proc_table() {
+     if [ -r /proc/self/stat ]; then
+@@ -89,7 +102,7 @@ hotspot_set() {  # hotspot_set on|off: the toggle itself, and the persistent fla
+ }
+ band_toggle() { mu300-wifi-band toggle | logger -t mu300-buttons 2>/dev/null; }
+ 
+-mu300-keys -l 3000 -t 5 | { while read -r code kind; do
++mu300-keys -l "$HOLD" -t 5 | { while read -r code kind; do
+     # the tick every 5 s is no press: it lets the LEDs time out, and the U30 Air's battery LED follow the charge
+     # (plugged in, unplugged, the 60 % and 10 % marks)
+     if [ "$kind" = tick ]; then mu300-led tick; continue; fi
+@@ -122,5 +135,18 @@ mu300-keys -l 3000 -t 5 | { while read -r code kind; do
+             if is_openwrt; then poweroff; else systemctl poweroff; fi ;;
+         "$KEY_WIFI short") [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
+         "$KEY_WIFI long") [ -z "$dir" ] || in_background "$DEADLINE" hotspot_set "$dir" ;;
++        # The V50's one key: a press switches the hotspot band, a 10 s hold reboots. The marker is left
++        # first for the same reason the hotspot toggle leaves one - a reboot must not be undone by a
++        # wake that puts the radios back.
++        # The flash comes before the switch: the reload that follows takes seconds, so the colour that answers
++        # for the new band is a while away, and without this the press would look like nothing happened.
++        # The hold flashes all three colours (the same siren thermal-guard uses) until the power goes: reboot is
++        # asynchronous, and an LED that stopped at the last colour would look like a hang.
++        "$KEY_FN short") mu300-led flash; [ "$was_idle" = 1 ] || in_background "$DEADLINE" band_toggle ;;
++        "$KEY_FN long")
++            logger -t mu300-buttons "V50 key held ${HOLD} ms: rebooting" 2>/dev/null
++            mkdir -p "$PST" 2>/dev/null; : > "$PST/reboot" 2>/dev/null
++            mu300-led alarm on
++            if is_openwrt; then reboot; else systemctl reboot; fi ;;
+     esac
+ done; wait; }
+diff --git a/rootfs/overlay/opt/mu300/bin/mu300-led b/rootfs/overlay/opt/mu300/bin/mu300-led
+index 52f099d..08d2aec 100755
+--- a/rootfs/overlay/opt/mu300/bin/mu300-led
++++ b/rootfs/overlay/opt/mu300/bin/mu300-led
+@@ -22,6 +22,9 @@
+ #   mu300-led test              each LED in turn, 2 s each, with its name (to tell which one is where)
+ #   mu300-led alarm on|off      too hot (thermal-guard): the PMIC's RGB LED flashes red, white, blue one at a time
+ #                               like a siren, also while the others are dark
++#   mu300-led flash             the colour that is lit flashes LED_KEY_FLASH_COUNT times and settles again: a key
++#                               that acted says so (V50: the one key switches the band, and the reload that follows
++#                               takes seconds, so the new colour is a while away)
+ # ZTE F50 (read from its Android): network = the PMIC's RGB LED, blue on 4G, white (its "green" channel) on 5G, red
+ #   without service; Wi-Fi = the PMIC's keypad backlight sink ("keyboard-backlight"), at ZTE's 48 of 127, whichever
+ #   band. No power LED. ZTE U30 Air (found by lighting each one):
+@@ -81,6 +84,9 @@ BATTERY_LED=
+ PSY=$R/sys/class/power_supply
+ TIMEOUT=$(sed -n 's/^LED_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
+ TIMEOUT=${TIMEOUT:-$DEFAULT_TIMEOUT}
++# how often a key's "I heard that" flash blinks (LED_KEY_FLASH_COUNT in led.conf, default 2)
++KEY_FLASH_COUNT=$(sed -n 's/^LED_KEY_FLASH_COUNT=\([0-9][0-9]*\)$/\1/p' "${MU300_LED_CONF:-/etc/mu300/led.conf}" 2>/dev/null | tail -n1)
++case $KEY_FLASH_COUNT in ''|*[!0-9]*) KEY_FLASH_COUNT=2 ;; esac
+ 
+ uptime_s() { cut -d. -f1 "$R/proc/uptime" 2>/dev/null || echo 0; }
+ before() {  # before FILE: the uptime in FILE has not come yet
+@@ -372,6 +378,23 @@ case "$1 ${2:-}" in
+                 write "$on" 1; nap 0.25
+             done
+         done ;;
++    "flash "*)   # a key acted: say so while the change it made is still on its way (a band switch reloads
++        # Wi-Fi, which takes seconds, and the colour that answers for it comes with the new channel).
++        # Only the V50 has one lamp carrying every state, so only it has a colour to flash.
++        [ "$DEVICE" = v50 ] || exit 0
++        shown || exit 0   # dark is dark: a flash is not a reason to light a device that is meant to be dark
++        _fl=
++        for l in "$NODATA" "$DATA" "$DATA5G"; do
++            [ -n "$l" ] || continue
++            [ "$(cat "$STATE/$l" 2>/dev/null)" = 1 ] && { _fl=$l; break; }
++        done
++        [ -n "$_fl" ] || exit 0
++        _fi=0
++        while [ "$_fi" -lt "$KEY_FLASH_COUNT" ]; do
++            write "$_fl" 0; nap 0.15
++            write "$_fl" 1; nap 0.15
++            _fi=$((_fi + 1))
++        done ;;
+     "test "*)
+         for l in "$LEDS"/*; do
+             n=${l##*/}

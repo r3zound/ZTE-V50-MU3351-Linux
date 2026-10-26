@@ -512,6 +512,7 @@ docs/
   06-OpenWrt操作手册.md      刷完后的日常操作（各通道、坑、能力清单）
   07-内核与按键与监管域.md   6.18/7.2/7.3 内核切换（含 rollback）、5GHz 监管域根因、实体按键键码与映射
   08-灯光效果方案.md         灯语表、内核驱动方案、实测结果、两次公开的结论更正与退路
+  09-OTA升级后恢复.md        上游 OTA 之后怎么把源、插件和按键补丁复原（实测手册）
 tools/
   apply-v50-patches.ps1     19 步补丁（幂等，含编码与灯光门禁）★核心
   backup-v50-partitions.ps1 28 分区备份 + sha256 校验
@@ -530,6 +531,7 @@ plugins/
   ufi-tools-restart-to-openwrt.js   UFI-TOOLS 一键切换插件
 patches/
   v50-changes-vs-upstream-v2026.10.23.2.patch   对上游的完整改动（LF，可 git apply；新增脚本带可执行位）
+  v50-buttons-vs-upstream-v2026.10.26.1.patch  上游 26.1 基线上的按键与灯光移植（OTA 到 26.1 后重放用）★
 probe/
   可行性探测脚本（GPT / 空间 / 硬件探测）
 ```
@@ -582,6 +584,10 @@ probe/
 | **安装向导在 V50 上拒绝 5.4 内核** | 上游只给 V50 主线内核（6.18 / 7.2 / 7.3） | 菜单 `1=5.4 / 2=6.18 / 3=7.2 / 4=7.3`，V50 的默认项是 2 |
 | **装完重启没进 OpenWrt，回了 Android** | 写新启动镜像会先解锁试运行一次（`--trial`），失败计数只在试运行期间生效 | `mu300-next-boot status` 看 `default boot` 与 `locked` |
 | 面板灯全黑（主线内核） | 灯在内核驱动上，先看驱动绑上没有 | `dmesg \| grep aw9523b` 应有 `aw9523b-led 3-005b: 4 LED groups` |
+| **上游 OTA 之后 `apk` 什么都装不上** | 恢复出厂把 `/etc/apk/repositories.d/` 清空了 | `docs/09-OTA升级后恢复.md` 第 2 节 |
+| **OTA 之后插件全没了、实体键也没反应** | OTA 用官方镜像整个换掉系统，我们打的补丁被抹了 | `docs/09-OTA升级后恢复.md` 第 3、4 节 |
+| **`apk add mihomo-meta` 说文件冲突装不上** | 出厂的 `mihomo-alpha` 占着同一个二进制路径 | `docs/09-OTA升级后恢复.md` §3.4 |
+| **`mu300-user-packages retry` 回一句 `running already` 就不动了** | 上次被强杀的运行留下了锁目录 | `docs/09-OTA升级后恢复.md` §5.1 |
 
 ---
 
