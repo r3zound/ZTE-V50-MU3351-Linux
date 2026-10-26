@@ -8,8 +8,8 @@
 |---|---|
 | 目标设备 | ZTE V50（`MU3351`，板型 `ums9620_2h10_feimao`） |
 | 上游项目 | [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)（MIT） |
-| 验证版本 | 上游 **v2026.10.23.2** + 本仓库 19 步补丁（自建镜像 **v2026.10.23.3**） |
-| 系统 | Android 13 + OpenWrt 25.12.5（`openwrt-luci` 面板版） |
+| 验证版本 | 上游 **v2026.10.26.1**（当前基线）+ 本仓库补丁 `patches/v50-changes-vs-upstream-v2026.10.26.1.patch`；旧基线 **v2026.10.23.2** 的补丁也保留着 |
+| 系统 | Android 13 + OpenWrt 25.12.6（`openwrt-luci` 面板版） |
 | 内核 | **7.3.0**（主线，2026-10-25 刷机实测可用）。上游**只给 V50 主线内核**（6.18 / 7.2 / 7.3），选 5.4 会被安装器直接拒绝。安装向导本来就会问，已装设备可 `mu300-update kernel` 就地切换、`rollback-boot` 回退。见 `docs/07-内核与按键与监管域.md` |
 | 风险 | 低。不动 `boot_a` / GPT / `userdata`；只写 Linux 区、`boot_b`、`misc` 的 32 字节 |
 
@@ -66,25 +66,48 @@ $R   = '<本仓库克隆到某处>'          # 例：D:\V50
 
 # 1) 取上游源码（版本要匹配，见 3.1）
 git clone https://github.com/dikeckaan/mu300-linux "$R\mu300-linux"
+git -C "$R\mu300-linux" checkout v2026.10.26.1
 
-# 2) 打补丁（19 步，幂等，可重复跑）
+# 2) 打 V50 移植补丁（28 个文件）★ 少了这步，按键就是死的 —— 见 3.2
+git -C "$R\mu300-linux" apply "$R\patches\v50-changes-vs-upstream-v2026.10.26.1.patch"
+
+# 3) 再跑 19 步脚本（幂等；此时应全部报 already，两道门禁通过）
 & "$R\tools\apply-v50-patches.ps1" -Repo "$R\mu300-linux"
 
-# 3) 只读检查
+# 4) 只读检查
 & "$R\mu300-linux\install.ps1" -Check
 
-# 4) 安装
+# 5) 安装
 & "$R\mu300-linux\install.ps1" -Lang zh -NoSelfUpdate -Answers "$R\answers.txt"
 
-# 5) 装机后设置（决定"能不能上网"，别跳过）—— 见第 5 节
+# 6) 装机后设置（决定"能不能上网"，别跳过）—— 见第 5 节
 ```
 
 ### 3.1 版本要匹配
 
-`tools\apply-v50-patches.ps1` 里的锚点是按上游 **v2026.10.23.2** 的行写的。
-换版本前先看它跑完有没有 `MISS`：**任何一步 MISS 都必须人工确认**，别硬刷。
+| 上游版本 | 用哪个补丁 | 脚本 |
+|---|---|---|
+| **v2026.10.26.1**（当前基线） | `patches/v50-changes-vs-upstream-v2026.10.26.1.patch` | 同上，19 步 |
+| v2026.10.23.2（旧基线） | `patches/v50-changes-vs-upstream-v2026.10.23.2.patch` | 同上，19 步 |
 
-### 3.2 安装答案文件
+脚本里的锚点原本是按 23.2 的行写的，26.1 改写了 `mu300-hw`（`hw_bringup()` 换了顺序、
+加了 `ap_enabled_soon`），所以**逐行替换**而不是整块替换，两个基线都能命中。
+换别的版本前先看它跑完有没有 `MISS`：**任何一步 MISS 都必须人工确认**，别硬刷。
+
+### 3.2 第 2 步的 `git apply` 不能省
+
+三处东西**只有补丁文件里有，脚本不会写**：
+
+| 只有补丁带来的 | 脚本做了什么 | 少了会怎样 |
+|---|---|---|
+| `mu300-led` 的 `flash` 子命令 | 只检查，不写 | 按键调了一个 `mu300-led` 没有的子命令，打印用法然后什么也不做——**按键看起来像没反应** |
+| `mu300-buttons` 认 `KEY_FN=464` + 长按 10 秒 | 只检查，不写 | V50 唯一的实体键**完全没反应**（上游只认 U30 Air 的键码） |
+| `init.d/mu300-buttons` 的 `stop_service()` | 只检查，不写 | 第二个 `mu300-keys` 同时读同一个 gpio-keys，**每次按键被处理两遍**（切频段切两次等于没切） |
+
+脚本第 19 步的灯光/按键门禁就是查这三样在不在——**不打补丁直接跑脚本，这一关过不去**。
+反过来，先 `git apply` 再跑脚本，19 步会全部报 `already`，这是正常结果，不是出错。
+
+### 3.3 安装答案文件
 
 `answers.txt` 一行一个答案，顺序固定（实测可用的一份）：
 
@@ -134,6 +157,20 @@ INSTALL  最终确认（必须是大写 INSTALL）
 > | `init.d/mu300-buttons` 补 `stop_service()` | 上游这个脚本没有它，`restart` 停不掉旧实例 | 第二个 `mu300-keys` 同时读同一个 gpio-keys，**每次按键被处理两遍**（切频段切两次等于没切） |
 >
 > 其余 16 步在 v2026.10.12 时代就写好，v2026.10.23.2 上**仍然必要**（逐条核对过）。
+>
+> **2026-10-26：上游 26.1 又改了几处，这 19 步仍然全部必要，但有两点变了**
+>
+> 1. **上游 26.1 已经自己做了两件事**，脚本不再重复做，只报 `already`：
+>    机型过滤（`device:MU3351` 已在过滤器里）和看板 DNS 改用 `jsonfilter`。
+> 2. **上游 26.1 重写了 `mu300-hw` 的 `hw_bringup()`**（规则先、芯片后，加了 `ap_enabled_soon`）。
+>    我们的「每步加超时」是套在它上面的，不是替换它——脚本改成**逐行**替换，23.2 和 26.1 都能命中。
+>
+> 还有一条与上游无关、但踩过一次的坑：**脚本文件自己的行尾必须是干净的 CRLF**。
+> 如果它变成 `CR CR LF`，PowerShell 5.1 照样能解析，但每个 here-string 都会带上一个多余的 CR：
+> 写出来的 `mu300-lancheck` 开头多一个空行（**shebang 不在第 0 字节，内核直接拒绝执行**）、
+> 结尾多一个孤立 CR，而脚本的「已经打过补丁了吗」判断也会失效，于是同一段补丁被反复贴进去。
+> 现在的脚本在 `Patch` 里把文本、匹配串、替换串里的 CR 全部去掉，第 18 步的门禁也改成
+> **任何 CR 都不放过**、并额外检查文件是不是以换行开头。
 
 | 步 | 修什么 | 不打会怎样 |
 |---|---|---|
@@ -207,7 +244,7 @@ OpenWrt 25.12 用 **apk**（不是 opkg），源文件是 `/etc/apk/repositories
 | **`mirrors.tuna.tsinghua.edu.cn/openwrt`** | 8/8，重复请求 20/20 | rc=0，4 s，11178 个包 |
 | `downloads.openwrt.org`（官方） | 8/8，重复请求 20/20 | rc=0，7 s，11178 个包 |
 
-原因很具体：**阿里云的 `releases/` 只同步到 `25.12.0-rc2`，没有本镜像用的 25.12.5**
+原因很具体：**阿里云的 `releases/` 只同步到 `25.12.0-rc2`，没有本镜像用的 25.12.6**
 （`build-rootfs.sh` 里 `MU300_WRT_VER` 的默认值）。8 条索引 URL 全部 404，而设备上
 **不会有任何报错**——镜像"配好了"、apk 也能跑，要到真正装东西时才炸。
 
@@ -530,8 +567,9 @@ tools/
 plugins/
   ufi-tools-restart-to-openwrt.js   UFI-TOOLS 一键切换插件
 patches/
-  v50-changes-vs-upstream-v2026.10.23.2.patch   对上游的完整改动（LF，可 git apply；新增脚本带可执行位）
-  v50-buttons-vs-upstream-v2026.10.26.1.patch  上游 26.1 基线上的按键与灯光移植（OTA 到 26.1 后重放用）★
+  v50-changes-vs-upstream-v2026.10.26.1.patch  对上游 26.1 的完整改动（28 个文件，LF，可 git apply；新增脚本带可执行位）★
+  v50-changes-vs-upstream-v2026.10.23.2.patch   对上游 23.2 的完整改动（旧基线，LF，可 git apply；新增脚本带可执行位）
+  v50-buttons-vs-upstream-v2026.10.26.1.patch  只含按键与灯光 3 个文件（OTA 到 26.1 丢了按键移植时快补用）
 probe/
   可行性探测脚本（GPT / 空间 / 硬件探测）
 ```
@@ -575,7 +613,7 @@ probe/
 | WiFi 连 ping 都不通，USB 口却正常 | 两条重复路由 | 5.3 |
 | 切不进 Linux，报「not Linux」 | boot 镜像命令行被改过 | 第 4 节补丁第 2/2b 步 |
 | 设备再也回不了 Android（断电也没用） | 无条件 re-arm 把两个回退计数器都清了 | 第 4 节补丁第 4 步 |
-| **`apk add` 装不上，或 `apk update` 退出码 8** | 镜像站没有本镜像用的 25.12.5（阿里云就是这样） | 第 4 节 §4.3 |
+| **`apk add` 装不上，或 `apk update` 退出码 8** | 镜像站没有本镜像用的 25.12.6（阿里云就是这样） | 第 4 节 §4.3 |
 | **看板「链路与流量」里 DNS 永远是 `--`** | 后端用逐行 sed 取多行 JSON 的数组，匹配不上 | 第 4 节 §4.1（补丁第 15 步） |
 | 装了 `luci-app-commands` 却找不到菜单 | 它在 **系统 → Custom Commands**，不是顶级菜单 | `/cgi-bin/luci/admin/system/commands` |
 | 改了 `openwrt/overlay/` 却毫无效果 | 预编译安装只认 vendor-extra 通道 | 4.2 |

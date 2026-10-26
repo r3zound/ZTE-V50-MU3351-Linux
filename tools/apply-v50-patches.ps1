@@ -22,6 +22,21 @@ param([string]$Repo = "D:\OneDrive\User\Network\CPE\V50\tools\mu300-linux")
 $ErrorActionPreference = 'Stop'
 $patched = 0
 
+# Patch-IfAbsent: the same as Patch, but a step whose job upstream has already taken over is
+# reported as such instead of as a MISS.
+#
+# A MISS means "this did not apply, look at it by hand" - and the README asks the reader to
+# do exactly that. On a newer upstream there is nothing to look at: upstream 26.1 knows the
+# V50 by itself (its model filters carry device:MU3351) and reads the dashboard's DNS with
+# jsonfilter itself. Saying "already" keeps the signal honest.
+function Patch-IfAbsent([string]$file, [string]$marker, [string]$find, [string]$replace, [string]$what, [string]$note) {
+    if ($marker -and (Test-Path $file) -and ([IO.File]::ReadAllText($file)).Contains($marker)) {
+        Write-Host "  already: $what ($note)"
+        return
+    }
+    Patch $file $find $replace $what
+}
+
 function Patch([string]$file, [string]$find, [string]$replace, [string]$what) {
     if (-not (Test-Path $file)) { Write-Host "  SKIP $what : $file not found"; return }
     # Normalise every newline to LF before comparing.
@@ -30,9 +45,9 @@ function Patch([string]$file, [string]$find, [string]$replace, [string]$what) {
     # which is CRLF on Windows, so a multi-line $find never matches even though it looks identical - the
     # anchor simply was not there as far as -contains was concerned. Normalising both sides makes the
     # anchors work no matter which editor or platform wrote either file.
-    $t = ([IO.File]::ReadAllText($file)) -replace "`r`n", "`n"
-    $f = $find    -replace "`r`n", "`n"
-    $r = $replace -replace "`r`n", "`n"
+    $t = (([IO.File]::ReadAllText($file)) -replace "`r`n", "`n") -replace "`r", ""
+    $f = (($find    -replace "`r`n", "`n") -replace "`r", "")
+    $r = (($replace -replace "`r`n", "`n") -replace "`r", "")
     if ($t.Contains($r)) { Write-Host "  already: $what"; return }
     if (-not $t.Contains($f)) { Write-Host "  MISS  $what : pattern not found in $file"; return }
     # write back with the LF the rest of the tree uses, and with UTF-8 and NO BOM, explicitly.
@@ -59,7 +74,7 @@ Patch "$Repo\install.ps1" `
     "} elseif (`$model -notmatch 'MU300|F50|mu300|V50|MU3351') {" `
     'install.ps1:416 model check'
 
-Patch "$Repo\install.ps1" `
+Patch-IfAbsent "$Repo\install.ps1" 'device:MU3351' `
     "`$f50 = @(`$all | Where-Object { `$_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })" `
     "`$f50 = @(`$all | Where-Object { `$_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })" `
     'install.ps1:219 SelectDevice filter'
@@ -68,7 +83,7 @@ Patch "$Repo\install.ps1" `
 # which would be patched twice or not at all depending on the order.
 $oldT = "`$target = @((Quiet { adb devices -l }) | Where-Object { `$_ -match '^\S+\s+device\b' -and `$_ -match 'model:F50|product:MU300|device:MU300|device:U30Air' })"
 $newT = "`$target = @((Quiet { adb devices -l }) | Where-Object { `$_ -match '^\S+\s+device\b' -and `$_ -match 'model:F50|product:MU300|device:MU300|device:U30Air|model:V50|device:MU3351' })"
-Patch "$Repo\install.ps1" $oldT $newT 'install.ps1:372 target filter'
+Patch-IfAbsent "$Repo\install.ps1" 'device:MU3351' $oldT $newT 'install.ps1:372 target filter' 'upstream knows the V50'
 Write-Host ""
 Write-Host "=== 2. keep the boot image's kernel command line exactly 'loglevel=5' ==="
 # This was a MU300_USBNET patch, and it was reverted on 2026-10-10: two reasons, both learned the hard way.
@@ -105,7 +120,7 @@ $guardBlock = @'
 # device can no longer be switched into Linux from Android at all.
 BOOT_CMDLINE = b'loglevel=5'
 '@
-Patch "$Repo\boot\build-boot-image.py" $rndisBlock.Trim() $guardBlock.Trim() 'build-boot-image.py: undo the MU300_USBNET kernel command line'
+Patch-IfAbsent "$Repo\boot\build-boot-image.py" "BOOT_CMDLINE = b'loglevel=5'" $rndisBlock.Trim() $guardBlock.Trim() 'build-boot-image.py: undo the MU300_USBNET kernel command line' 'the guard is already in place'
 Patch "$Repo\boot\build-boot-image.py" "BOOT_CMDLINE = b'loglevel=5'" $guardBlock.Trim() 'build-boot-image.py: document why the command line must not grow'
 
 Write-Host ""
@@ -180,26 +195,26 @@ if ((Test-Path $hwFile) -and (Select-String -Path $hwFile -Pattern '^bringup_ste
     Patch $hwFile $oldBoot $newBoot.Trim() 'mu300-hw: bringup_step helper'
 }
 
+# One line at a time, not a block.
+#
+# Upstream 26.1 reordered these steps: the rules and the chip first (regdb-load, the country,
+# wifi-start), the vendor extras and zram after. A block anchor that matched 23.2 therefore
+# misses 26.1 entirely, and the port would be silently half applied - the boot would come up
+# with an unbounded wifi-start, which is the exact hang this step exists to prevent. Per line,
+# the same replacements land on whichever order the file has.
 $T = "`t"
-$old1 = $T + "/opt/mu300/bin/extra-modules >/tmp/mu300-extra-modules.log 2>&1" + "`n" + $T + "/opt/mu300/bin/zram-start >/dev/null 2>&1" + "`n" + $T + "/opt/mu300/bin/wifi-start >/tmp/mu300-wifi-start.log 2>&1"
-$new1 = $T + "bringup_step 60 extra-modules /opt/mu300/bin/extra-modules" + "`n" +
-        $T + "bringup_step 30 zram-start /opt/mu300/bin/zram-start" + "`n" +
-        $T + "# the Marlin3 stack: insmod of sprd_wlan_combo can block for good, so this is the bounded one that matters" + "`n" +
-        $T + "bringup_step 90 wifi-start /opt/mu300/bin/wifi-start"
-Patch "$Repo\openwrt\overlay\etc\init.d\mu300-hw" $old1 $new1 'mu300-hw: bounded extra-modules / zram-start / wifi-start'
-
-$old2 = $T + "/opt/mu300/bin/regdb-load >>/tmp/mu300-wifi-start.log 2>&1" + "`n" + $T + "/opt/mu300/bin/openwrt-wifi-config >>/tmp/mu300-wifi-start.log 2>&1"
-$new2 = $T + "bringup_step 20 regdb-load /opt/mu300/bin/regdb-load" + "`n" +
-        $T + "bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config"
-Patch "$Repo\openwrt\overlay\etc\init.d\mu300-hw" $old2 $new2 'mu300-hw: bounded regdb-load / openwrt-wifi-config'
-
-$old3 = $T + '[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && /opt/mu300/bin/mu300-nfc sync >/tmp/mu300-nfc.log 2>&1'
-$new3 = $T + '[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync'
-Patch "$Repo\openwrt\overlay\etc\init.d\mu300-hw" $old3 $new3 'mu300-hw: bounded mu300-nfc'
-
-$old4 = $T + "wifi down >>/tmp/mu300-wifi-start.log 2>&1" + "`n" + $T + "wifi up >>/tmp/mu300-wifi-start.log 2>&1"
-$new4 = $T + "bringup_step 60 wifi-down wifi down" + "`n" + $T + "bringup_step 60 wifi-up wifi up"
-Patch "$Repo\openwrt\overlay\etc\init.d\mu300-hw" $old4 $new4 'mu300-hw: bounded wifi down / up'
+Patch $hwFile ($T + "/opt/mu300/bin/extra-modules >/tmp/mu300-extra-modules.log 2>&1") ($T + "bringup_step 60 extra-modules /opt/mu300/bin/extra-modules") 'mu300-hw: bounded extra-modules'
+Patch $hwFile ($T + "/opt/mu300/bin/zram-start >/dev/null 2>&1") ($T + "bringup_step 30 zram-start /opt/mu300/bin/zram-start") 'mu300-hw: bounded zram-start'
+# the Marlin3 stack: insmod of sprd_wlan_combo can block for good, so this is the bounded one that matters
+# (upstream writes the log with > before 26.1 and with >> from 26.1 on: both are covered)
+$wifiStartNew = $T + "# the Marlin3 stack: insmod of sprd_wlan_combo can block for good, so this is the bounded one that matters" + "`n" +
+                $T + "bringup_step 90 wifi-start /opt/mu300/bin/wifi-start"
+Patch $hwFile ($T + "/opt/mu300/bin/wifi-start >/tmp/mu300-wifi-start.log 2>&1") $wifiStartNew 'mu300-hw: bounded wifi-start'
+Patch $hwFile ($T + "/opt/mu300/bin/wifi-start >>/tmp/mu300-wifi-start.log 2>&1") $wifiStartNew 'mu300-hw: bounded wifi-start'
+Patch $hwFile ($T + "/opt/mu300/bin/regdb-load >/tmp/mu300-wifi-start.log 2>&1") ($T + "bringup_step 20 regdb-load /opt/mu300/bin/regdb-load") 'mu300-hw: bounded regdb-load'
+Patch $hwFile ($T + "/opt/mu300/bin/openwrt-wifi-config >>/tmp/mu300-wifi-start.log 2>&1") ($T + "bringup_step 45 openwrt-wifi-config /opt/mu300/bin/openwrt-wifi-config") 'mu300-hw: bounded openwrt-wifi-config'
+Patch $hwFile ($T + '[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && /opt/mu300/bin/mu300-nfc sync >/tmp/mu300-nfc.log 2>&1') ($T + '[ "$(/opt/mu300/bin/mu300-device)" = u30air ] && bringup_step 20 mu300-nfc /opt/mu300/bin/mu300-nfc sync') 'mu300-hw: bounded mu300-nfc'
+Patch $hwFile ($T + "wifi down >>/tmp/mu300-wifi-start.log 2>&1" + "`n" + $T + "wifi up >>/tmp/mu300-wifi-start.log 2>&1") ($T + "bringup_step 60 wifi-down wifi down" + "`n" + $T + "bringup_step 60 wifi-up wifi up") 'mu300-hw: bounded wifi down / up'
 
 
 Write-Host ""
@@ -336,8 +351,14 @@ say "br-lan=[$br] ports=[$ports] wlan0=$wst dnsmasq=[$dm] tcp22=$l22 tcp80=$l80 
 '@
 $lancheckPath = "$Repo\openwrt\overlay\opt\mu300\bin\mu300-lancheck"
 New-Item -ItemType Directory -Force -Path (Split-Path $lancheckPath) | Out-Null
-# LF only: the device runs /bin/sh, and a CRLF shebang line fails there
-[IO.File]::WriteAllText($lancheckPath, ($lancheck -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
+# LF only, and the shebang at byte 0: the device runs /bin/sh, and a CRLF shebang line fails
+# there. The leading blank line and the trailing CR go as well: they are what a here-string
+# in a script whose own line endings are damaged leaves behind, and a file that starts with
+# a newline has no shebang at all - the kernel refuses to run it, and the LAN check, the one
+# thing that records whether a client gets an address, silently never happens.
+$lancheckText = (($lancheck -replace "`r`n", "`n") -replace "`r", "").TrimStart("`n")
+if (-not $lancheckText.EndsWith("`n")) { $lancheckText = $lancheckText + "`n" }
+[IO.File]::WriteAllText($lancheckPath, $lancheckText, (New-Object Text.UTF8Encoding($false)))
 Write-Host "  wrote: opt/mu300/bin/mu300-lancheck"
 
 $oldLan = $T + 'procd_set_param command /bin/sh -c "for i in $(seq 1 10); do grep -q '':0016 .* 0A '' /proc/net/tcp && { exec /opt/mu300/bin/mu300-next-boot --rearm; }; sleep 30; done; logger -t mu300-post ''no SSH after 5 min: not re-arming (the next boot returns to Android)''"' + "`n" +
@@ -734,7 +755,7 @@ $dashDnsNew = @'
 jarr_dns() { t3 jsonfilter -s "$1" -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ' | sed 's/  *$//'; }
 '@
 $dashDnsNew = $dashDnsNew.TrimEnd("`n") -replace "`r`n", "`n"
-Patch $dashFile $dashDnsOld $dashDnsNew 'dashboard-info: read dns-server with jsonfilter'
+Patch-IfAbsent $dashFile 'dns-server"][*]' $dashDnsOld $dashDnsNew 'dashboard-info: read dns-server with jsonfilter' 'upstream reads it with jsonfilter'
 
 # ...and the page has to be able to show more than one of them. M.set() assigns textContent, so the
 # servers arrive as one line unless the row is filled the same way as the address above it.
@@ -846,7 +867,7 @@ Write-Host "=== 17. point apk at a mirror that actually carries this release ===
 # mirror, and `apk update` takes 7 s versus 4 s.
 #
 # The mirror is not a free choice, and the obvious one is the wrong one:
-# mirrors.aliyun.com/openwrt does NOT carry 25.12.5 (its releases/ tree stops at 25.12.0-rc2,
+# mirrors.aliyun.com/openwrt does NOT carry 25.12.6 (its releases/ tree stops at 25.12.0-rc2,
 # the release this image is built from - openwrt/build-rootfs.sh, MU300_WRT_VER). All 8 index
 # URLs 404 there, `apk update` exits 8, and only 226 packages stay visible instead of 11178.
 # Nothing else on the device reports a problem: the mirror is "configured", apk runs, and the
@@ -878,8 +899,8 @@ $feed = @'
 # `apk update` reports the same 11178 packages from either.
 #
 # WHY NOT ALIYUN, since mirrors.aliyun.com/openwrt is the obvious first guess:
-# that mirror's releases/ tree stops at 25.12.0-rc2 and does not carry 25.12.5, the release
-# this image is built from (openwrt/build-rootfs.sh: MU300_WRT_VER defaults to 25.12.5).
+# that mirror's releases/ tree stops at 25.12.0-rc2 and does not carry 25.12.6, the release
+# this image is built from (openwrt/build-rootfs.sh: MU300_WRT_VER defaults to 25.12.6).
 # Every one of the 8 index URLs 404s there, so `apk update` exits 8 and only 226 packages
 # remain visible instead of 11178 - the device looks like it has a working package manager
 # right up until something is actually installed. Verified on the device, not inferred.
@@ -895,24 +916,35 @@ $feed = @'
 # paths that do not exist, so a HEAD probe reports "available" for a feed that is not there.
 #
 # To go back to upstream, replace the host below with https://downloads.openwrt.org - the
-# paths do not change. The kernel version in the kmods path (6.12.94-1-ba5ca7f...) is part
-# of the path and must match the running kernel: an index for another kernel is not a
-# fallback, it is a wrong answer.
+# paths do not change.
+#
+# THE VERSION SEGMENT AND THE KMODS PATH FOLLOW THE OPENWRT RELEASE, NOT THE RUNNING
+# KERNEL.  The kmods directory is named after the kernel the OpenWrt userspace was built
+# against, and that is what the other seven indexes expect.  The kernel this device
+# actually boots is mu300's own mainline 7.3.0, and the modules it needs are not modules
+# at all: CONFIG_TUN, CONFIG_NFT_TPROXY and CONFIG_NFT_SOCKET are built into it (=y).  The
+# kmod-* packages from the release therefore land in /lib/modules/6.12.112/ and are not
+# loadable by the running kernel - harmless, but do not read it as "the kmod packages do
+# the work".  Changing the version segment or the kmods path is NOT a fallback: an index
+# built for another release is a wrong answer, not a spare one.
 #
 # Contents are comments and 8 URLs; this file is read by apk, not by a shell.
 
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/packages/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/base/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/luci/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/packages/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/routing/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/telephony/packages.adb
-https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/video/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/targets/armsr/armv8/packages/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/base/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/targets/armsr/armv8/kmods/6.12.112-1-67e205f26d0458c4d12f1fd315216398/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/luci/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/packages/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/routing/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/telephony/packages.adb
+https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/packages/aarch64_generic/video/packages.adb
 '@
 $feedPath = "$Repo\openwrt\overlay\etc\apk\repositories.d\distfeeds.list"
-if ((Test-Path $feedPath) -and ([IO.File]::ReadAllText($feedPath)).Contains('mirrors.tuna.tsinghua.edu.cn')) {
-    Write-Host "  already: apk feed -> mirrors.tuna.tsinghua.edu.cn"
+# The release segment is part of the check, not just the mirror: a tree that still points at
+# an older release (25.12.5, from the 23.2 port) has the wrong packages for this image, and
+# "the mirror is right" is not enough.
+if ((Test-Path $feedPath) -and ([IO.File]::ReadAllText($feedPath)).Contains('mirrors.tuna.tsinghua.edu.cn') -and ([IO.File]::ReadAllText($feedPath)).Contains('/releases/25.12.6/')) {
+    Write-Host "  already: apk feed -> mirrors.tuna.tsinghua.edu.cn, release 25.12.6"
 } else {
     New-Item -ItemType Directory -Force -Path (Split-Path $feedPath) | Out-Null
     # LF and no BOM, for the same reason every other file here is: apk reads it, but the encoding
@@ -977,7 +1009,13 @@ foreach ($tree in @("$Repo\openwrt\vendor-extra", "$Repo\openwrt\overlay", "$Rep
                 if ($b[$i] -eq 0) { $why += 'NUL in the first 512 bytes'; break }
             }
         }
-        if (-not $why -and [Text.Encoding]::ASCII.GetString($b) -match "`r`n") { $why += 'CRLF' }
+        # Any CR at all, not just CRLF: a lone CR at the end of the last line is what a
+        # here-string in a script with damaged line endings writes, and it reaches the device
+        # as part of the command.
+        if (-not $why -and [Text.Encoding]::ASCII.GetString($b) -match "`r") { $why += 'CR' }
+        # A file that starts with a newline has no shebang, so the kernel will not run it -
+        # "Exec format error", and nothing anywhere says the script did not run.
+        if (-not $why -and $b[0] -eq 0x0A) { $why += 'starts with a newline (no shebang at byte 0)' }
         if ($why) { $bad += ('  ' + $_.FullName.Substring($Repo.Length + 1) + '  ->  ' + ($why -join ', ')) }
     }
 }
